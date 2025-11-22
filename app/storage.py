@@ -9,7 +9,7 @@ load_dotenv()
 # Config
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "audio-files")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "reading_app")
 STORAGE_DIR = os.getenv("STORAGE_DIR", "./storage")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -47,7 +47,7 @@ def upload_file_to_supabase(local_path: str, remote_path: str, content_type: str
     """
     Upload a local file to Supabase storage and return a public URL.
     local_path: path on disk
-    remote_path: e.g. "job_id/page_7.mp3"
+    remote_path: e.g. "pdfs/job_id/audio/page_7.mp3"
     """
     if not os.path.exists(local_path):
         raise FileNotFoundError(f"Local file not found: {local_path}")
@@ -89,7 +89,7 @@ def upload_raw_file_to_supabase(file_obj, remote_path: str, content_type: str = 
 def download_file_from_supabase(remote_path: str, local_path: str) -> None:
     """
     Download a file from Supabase storage to local path.
-    remote_path: e.g. "pdfs/job_id/book.pdf" or "job_id/page_7.mp3"
+    remote_path: e.g. "pdfs/job_id/book.pdf" or "pdfs/job_id/audio/page_7.mp3"
     """
     # Some supabase clients return bytes, some return a response-like object.
     res = supabase.storage.from_(SUPABASE_BUCKET).download(remote_path)

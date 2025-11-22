@@ -39,7 +39,7 @@ def process_page_task(self, job_id: str, page_number: int):
         generate_speech(cleaned, local_mp3)
 
         # Upload MP3 to Supabase
-        remote_mp3 = f"{job_id}/page_{page_number}.mp3"
+        remote_mp3 = f"pdfs/{job_id}/audio/page_{page_number}.mp3"
         url = upload_file_to_supabase(local_mp3, remote_mp3, "audio/mpeg")
         # DELETE local mp3 after successful upload
         if os.path.exists(local_mp3):
@@ -57,13 +57,15 @@ def merge_job_mp3s(job_id: str):
     from .storage import supabase, SUPABASE_BUCKET
 
     # List MP3 files from Supabase
-    files = supabase.storage.from_(SUPABASE_BUCKET).list(job_id)
+    path_to_audio = f"pdfs/{job_id}/audio/"
+    files = supabase.storage.from_(SUPABASE_BUCKET).list(path_to_audio)
     mp3_names = sorted([f["name"] for f in files if f["name"].endswith(".mp3")])
 
+    print(mp3_names, "to merge")
     local_paths = []
     for name in mp3_names:
         lp = os.path.join(job_dir, name)
-        download_file_from_supabase(f"{job_id}/{name}", lp)
+        download_file_from_supabase(f"pdfs/{job_id}/audio/{name}", lp)
         local_paths.append(lp)
 
     # Merge audio

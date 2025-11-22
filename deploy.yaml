@@ -15,5 +15,4 @@ services:
     env: docker
     plan: starter
     dockerfilePath: ./Dockerfile
-    startCommand: |
-      celery -A app.tasks worker --loglevel=info --pool=solo
+    startCommand: celery -A app.tasks worker --loglevel=INFO
