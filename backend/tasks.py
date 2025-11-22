@@ -3,11 +3,11 @@ import os
 import logging
 from pydub import AudioSegment
 
-from .celeryconfig import celery_app
-from .pdf_utils import extract_page_text
-from .genai_helper import clean_text_with_gemini
-from .tts import generate_speech
-from .storage import (
+from celeryconfig import celery_app
+from pdf_utils import extract_page_text
+from genai_helper import clean_text_with_gemini
+from tts import generate_speech
+from storage import (
     upload_file_to_supabase,
     download_file_from_supabase,
     cleanup_folder,

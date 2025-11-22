@@ -5,9 +5,9 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from dotenv import load_dotenv
 from typing import Optional
 
-from .storage import upload_raw_file_to_supabase, download_file_from_supabase
-from .pdf_utils import get_num_pages
-from .tasks import process_page_task, merge_job_mp3s
+from storage import upload_raw_file_to_supabase, download_file_from_supabase
+from pdf_utils import get_num_pages
+from tasks import process_page_task, merge_job_mp3s
 
 load_dotenv()
 
