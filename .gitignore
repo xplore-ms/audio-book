@@ -21,7 +21,6 @@ book.pdf
 # Local storage / temp directories
 storage/
 tmp/
-temp/
 *.sqlite3
 
 # OS files
