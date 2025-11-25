@@ -1,21 +1,27 @@
-# pdf_utils.py
 import fitz  # PyMuPDF
 
-def get_num_pages(pdf_path: str) -> int:
-    doc = fitz.open(pdf_path)
-    try:
-        return len(doc)
-    finally:
-        doc.close()
+
+def get_num_pages_from_bytes(pdf_bytes: bytes) -> int:
+    """
+    Return the number of pages in a PDF (from bytes).
+    """
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        return doc.page_count
 
 
-def extract_page_text(pdf_path: str, page_index: int) -> str:
+def extract_page_text_from_bytes(pdf_bytes: bytes, page_number: int) -> str:
     """
-    page_index: 0-based
+    Extract text from PDF page using only bytes.
+    page_number = zero-based index
     """
-    doc = fitz.open(pdf_path)
-    try:
-        page = doc.load_page(page_index)
-        return page.get_text()
-    finally:
-        doc.close()
+    if page_number < 0:
+        raise ValueError("Page number must be >= 0")
+
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        if page_number >= doc.page_count:
+            raise ValueError(f"Page {page_number+1} out of range")
+
+        page = doc.load_page(page_number)
+        text = page.get_text("text")
+
+    return text or ""

@@ -1,82 +1,72 @@
-# main.py
-import os
-import uuid
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from dotenv import load_dotenv
 from typing import Optional
+import uuid
+import os
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from celery import Celery
 
-from storage import upload_raw_file_to_supabase, download_file_from_supabase
-from pdf_utils import get_num_pages
-from tasks import process_page_task, merge_job_mp3s
+from supabase_client import upload_bytes, download_to_bytes
+from pdf_utils import get_num_pages_from_bytes
 
-load_dotenv()
 
-TEMP_BASE = "temp/jobs"   # <------ OPTION A
 
-app = FastAPI(title="PDF → Audio Service")
+app = FastAPI(title="Stateless PDF → Audio Backend")
 
+celery = Celery("worker")
+celery.config_from_object("celeryconfig")
 
 @app.post("/upload")
-async def upload_pdf_backend(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Only PDF files allowed")
+async def upload_pdf(file: UploadFile = File(...)):
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(400, "Only PDF allowed")
 
     job_id = str(uuid.uuid4())
-    remote_path = f"pdfs/{job_id}/{file.filename}"
+    remote_path = f"pdfs/{job_id}/original.pdf"
 
-    # Upload raw stream directly to Supabase
-    url = upload_raw_file_to_supabase(
-        file.file,
-        remote_path,
-        content_type="application/pdf",
-    )
+    pdf_bytes = await file.read()
+    upload_bytes(remote_path, pdf_bytes, "application/pdf")
 
-    # Prepare job temp folder
-    job_dir = os.path.join(TEMP_BASE, job_id)
-    os.makedirs(job_dir, exist_ok=True)
-
-    # Local copy for page counting
-    local_pdf = os.path.join(job_dir, "original.pdf")
-    download_file_from_supabase(remote_path, local_pdf)
-
-    num_pages = get_num_pages(local_pdf)
+    num_pages = get_num_pages_from_bytes(pdf_bytes)
 
     return {
         "job_id": job_id,
         "remote_pdf_path": remote_path,
-        "pdf_url": url,
-        "num_pages": num_pages,
+        "num_pages": num_pages
     }
 
-
 @app.post("/start-job")
-async def start_job(job_id: str, remote_pdf_path: str, start: int = 1, end: Optional[int] = None):
-    job_dir = os.path.join(TEMP_BASE, job_id)
-    local_pdf = os.path.join(job_dir, "original.pdf")
+def start_job(job_id: str, remote_pdf_path: str, start: int = 1, end: Optional[int] = None):
+    pdf_bytes = download_to_bytes(remote_pdf_path)
+    total = get_num_pages_from_bytes(pdf_bytes)
 
-    # ensure PDF exists locally
-    if not os.path.exists(local_pdf):
-        download_file_from_supabase(remote_pdf_path, local_pdf)
+    start = start
+    end = end or total
 
-    total_pages = get_num_pages(local_pdf)
-
-    if end is None:
-        end = total_pages
-
-    if start < 1 or end > total_pages or start > end:
+    if start < 1 or end > total or start > end:
         raise HTTPException(400, "Invalid page range")
 
     task_ids = []
     for page in range(start, end + 1):
-        res = process_page_task.delay(job_id, page)  # <---- FIX: only pass job_id + page
-        task_ids.append(res.id)
+        r = celery.send_task("tasks.process_page", args=[job_id, remote_pdf_path, page])
+        task_ids.append(r.id)
 
-    return {
-        "job_id": job_id,
-        "pages": [start, end],
-        "task_ids": task_ids,
-    }
+    return {"job_id": job_id, "task_ids": task_ids}
 
+@app.get("/status/{task_id}")
+def get_status(task_id: str):
+    async_result = celery.AsyncResult(task_id)
+    return {"state": async_result.state, "result": async_result.result}
+
+# @app.get("/status/{task_id}")
+# async def task_status(task_id: str):
+#     ar = process_page_task.AsyncResult(task_id)
+#     info = {"id": task_id, "state": ar.state}
+
+#     if ar.state == "SUCCESS":
+#         info["result"] = ar.result
+#     elif ar.state == "FAILURE":
+#         info["result"] = str(ar.result)
+
+    return info
 
 @app.get("/status/{task_id}")
 async def task_status(task_id: str):
@@ -90,8 +80,7 @@ async def task_status(task_id: str):
 
     return info
 
-
 @app.post("/merge/{job_id}")
-async def merge_job(job_id: str):
-    res = merge_job_mp3s.delay(job_id)
-    return {"merge_task_id": res.id}
+def merge(job_id: str):
+    r = celery.send_task("tasks.merge_pages", args=[job_id])
+    return {"merge_task_id": r.id}
