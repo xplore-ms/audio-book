@@ -56,17 +56,6 @@ def get_status(task_id: str):
     async_result = celery.AsyncResult(task_id)
     return {"state": async_result.state, "result": async_result.result}
 
-# @app.get("/status/{task_id}")
-# async def task_status(task_id: str):
-#     ar = process_page_task.AsyncResult(task_id)
-#     info = {"id": task_id, "state": ar.state}
-
-#     if ar.state == "SUCCESS":
-#         info["result"] = ar.result
-#     elif ar.state == "FAILURE":
-#         info["result"] = str(ar.result)
-
-    return info
 
 @app.get("/status/{task_id}")
 async def task_status(task_id: str):
