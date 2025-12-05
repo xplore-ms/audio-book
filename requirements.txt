@@ -8,5 +8,7 @@ google-genai
 edge-tts
 pydub
 # boto3
+pymongo
+httpx
 python-multipart
 supabase
