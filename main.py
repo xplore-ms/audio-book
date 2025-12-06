@@ -76,9 +76,10 @@ async def upload_pdf(file: UploadFile = File(...), email: str = Form(...)):
     }
 
 
+MAX_PAGES = 4
+
 @app.post("/start-job")
 def start_job(job_id: str, remote_pdf_path: str, start: int = 1, end: Optional[int] = None):
-    # Validate presence of job in Mongo
     job = jobs_collection.find_one({"job_id": job_id})
     if job is None:
         raise HTTPException(404, "Job not found")
@@ -86,15 +87,32 @@ def start_job(job_id: str, remote_pdf_path: str, start: int = 1, end: Optional[i
     total = job["num_pages"]
     end = end or total
 
+    # Validate range is inside total pages
     if start < 1 or end > total or start > end:
         raise HTTPException(400, "Invalid page range")
 
+    # Count number of pages requested
+    pages_requested = end - start + 1
+
+    # Enforce max of 4 pages
+    if pages_requested > MAX_PAGES:
+        raise HTTPException(
+            400, 
+            f"You can only process a maximum of {MAX_PAGES} pages at once. "
+            f"You requested {pages_requested} pages."
+        )
+
+    # Process pages
     task_ids = []
     for page in range(start, end + 1):
         res = celery.send_task("tasks.process_page", args=[job_id, job["remote_pdf_path"], page])
         task_ids.append(res.id)
 
-    return {"job_id": job_id, "task_ids": task_ids}
+    return {
+        "job_id": job_id,
+        "task_ids": task_ids,
+        "pages_processing": pages_requested
+    }
 
 
 @app.get("/status/{task_id}")
