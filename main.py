@@ -34,29 +34,41 @@ def make_folder_name(job_id: str) -> str:
     return f"{date}_{job_id}"
 
 
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
+
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...), email: str = Form(...)):
     """
-    Upload PDF and register job with email (Option A).
+    Upload PDF and register job with email.
+    Prevents uploads > 50MB.
     """
 
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF allowed")
 
+    # Read the bytes
+    pdf_bytes = await file.read()
+
+    # --- Prevent PDF > 50MB ---
+    if len(pdf_bytes) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF is too large ({len(pdf_bytes) / (1024*1024):.2f} MB). "
+                   "Maximum allowed size is 50 MB."
+        )
+
     job_id = str(uuid.uuid4())
     folder_name = make_folder_name(job_id)
     remote_path = f"pdfs/{folder_name}/original.pdf"
 
-    # read bytes from upload
-    pdf_bytes = await file.read()
+    # Upload to Supabase
     upload_bytes(remote_path, pdf_bytes, "application/pdf")
 
-    # count pages from bytes
+    # Count pages
     num_pages = get_num_pages_from_bytes(pdf_bytes)
-    # calculate digits for zero-padding, e.g., 100 -> 3
     digits = len(str(num_pages))
 
-    # store metadata in MongoDB
+    # Store metadata
     jobs_collection.insert_one({
         "job_id": job_id,
         "email": email,
@@ -74,7 +86,6 @@ async def upload_pdf(file: UploadFile = File(...), email: str = Form(...)):
         "num_pages": num_pages,
         "digits": digits
     }
-
 
 MAX_PAGES = 4
 
