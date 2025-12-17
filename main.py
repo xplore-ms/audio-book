@@ -4,6 +4,8 @@ import uuid
 import os
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+import io
 from celery import Celery
 from datetime import datetime
 
@@ -140,3 +142,42 @@ def merge(job_id: str):
 
     r = celery.send_task("tasks.merge_pages", args=[job_id])
     return {"merge_task_id": r.id}
+
+@app.get("/api/audio/stream")
+def stream_audio(token: str):
+    job = jobs_collection.find_one({"access_token": token})
+    if not job:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    final_parts = job.get("final_parts", [])
+    if not final_parts:
+        raise HTTPException(status_code=404, detail="Audio not found")
+
+    def audio_generator():
+        """
+        Streams multiple WAV parts sequentially as one stream.
+        """
+        for idx, supabase_url in enumerate(final_parts):
+            # IMPORTANT:
+            # Convert Supabase URL back to storage path
+            # Example: extract "pdfs/.../final_part_1.wav"
+            storage_path = supabase_url.split("/storage/v1/object/public/")[-1]
+
+            audio_bytes = download_to_bytes(storage_path)
+
+            # Skip WAV header for all parts except first
+            if idx > 0:
+                audio_bytes = audio_bytes[44:]  # WAV header size
+
+            yield audio_bytes
+
+    return StreamingResponse(
+        audio_generator(),
+        media_type="audio/wav",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+            "Content-Disposition": "inline; filename=audiobook.wav"
+        }
+    )
+    
