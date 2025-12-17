@@ -12,6 +12,8 @@ from datetime import datetime
 from supabase_client import upload_bytes, download_to_bytes
 from pdf_utils import get_num_pages_from_bytes
 from mongo import jobs_collection, ensure_indexes
+from dotenv import load_dotenv
+load_dotenv()
 
 # ensure mongo indexes
 ensure_indexes()
@@ -30,6 +32,7 @@ app.add_middleware(
 celery = Celery("worker")
 celery.config_from_object("celeryconfig")
 
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "reading_app")
 
 def make_folder_name(job_id: str) -> str:
     date = datetime.utcnow().strftime("%Y%m%d")
