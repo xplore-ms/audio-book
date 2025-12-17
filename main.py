@@ -153,21 +153,28 @@ def stream_audio(token: str):
     if not final_parts:
         raise HTTPException(status_code=404, detail="Audio not found")
 
+    def extract_storage_path(public_url: str) -> str:
+        """
+        Converts:
+        https://xxx.supabase.co/storage/v1/object/public/reading_app/pdfs/abc.wav
+
+        To:
+        pdfs/abc.wav
+        """
+        marker = f"/storage/v1/object/public/{SUPABASE_BUCKET}/"
+        if marker not in public_url:
+            raise RuntimeError("Invalid Supabase public URL format")
+        return public_url.split(marker, 1)[1]
+
     def audio_generator():
-        """
-        Streams multiple WAV parts sequentially as one stream.
-        """
-        for idx, supabase_url in enumerate(final_parts):
-            # IMPORTANT:
-            # Convert Supabase URL back to storage path
-            # Example: extract "pdfs/.../final_part_1.wav"
-            storage_path = supabase_url.split("/storage/v1/object/public/")[-1]
+        for idx, public_url in enumerate(final_parts):
+            storage_path = extract_storage_path(public_url)
 
             audio_bytes = download_to_bytes(storage_path)
 
-            # Skip WAV header for all parts except first
+            # Strip WAV header for all except first
             if idx > 0:
-                audio_bytes = audio_bytes[44:]  # WAV header size
+                audio_bytes = audio_bytes[44:]
 
             yield audio_bytes
 
@@ -175,9 +182,7 @@ def stream_audio(token: str):
         audio_generator(),
         media_type="audio/wav",
         headers={
-            "Accept-Ranges": "bytes",
             "Cache-Control": "no-store",
             "Content-Disposition": "inline; filename=audiobook.wav"
         }
     )
-    
