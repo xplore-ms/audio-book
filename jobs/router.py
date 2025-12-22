@@ -1,0 +1,96 @@
+import uuid
+from datetime import datetime
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+
+from core.dependencies import get_current_user
+from credits.service import  (
+    require_credits,
+    deduct_credits,
+    UPLOAD_COST,
+    PAGE_COST
+)
+from supabase_client import upload_bytes
+from pdf_utils import get_num_pages_from_bytes
+from mongo import jobs_collection
+from celery import Celery
+from core.config import MAX_UPLOAD_SIZE, MAX_PAGES
+
+router = APIRouter(prefix="", tags=["Jobs"])
+
+celery = Celery("worker")
+celery.config_from_object("celeryconfig")
+
+@router.post("/upload")
+async def upload_pdf(
+    file: UploadFile = File(...),
+    user=Depends(get_current_user)
+):
+    require_credits(user, UPLOAD_COST)
+
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF allowed")
+
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) > MAX_UPLOAD_SIZE:
+        raise HTTPException(400, "File too large")
+
+    job_id = str(uuid.uuid4())
+    folder = f"{datetime.utcnow().strftime('%Y%m%d')}_{job_id}"
+    remote_pdf = f"pdfs/{folder}/original.pdf"
+
+    upload_bytes(remote_pdf, pdf_bytes, "application/pdf")
+    pages = get_num_pages_from_bytes(pdf_bytes)
+
+    jobs_collection.insert_one({
+        "job_id": job_id,
+        "user_id": user["_id"],
+        "remote_pdf_path": remote_pdf,
+        "email": user["email"],
+        "folder_name": folder,
+        "num_pages": pages,
+        "digits": len(str(pages)),
+        "created_at": datetime.utcnow()
+    })
+
+    deduct_credits(user, UPLOAD_COST)
+
+    return {"job_id": job_id, "pages": pages}
+
+@router.post("/start")
+def start_job(
+    job_id: str,
+    start: int = 1,
+    end: int | None = None,
+    user=Depends(get_current_user)
+):
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    total = job["num_pages"]
+    end = end or total
+    pages = end - start + 1
+
+    if pages > MAX_PAGES:
+        raise HTTPException(400, "Page limit exceeded")
+
+    require_credits(user, PAGE_COST * pages)
+    deduct_credits(user, PAGE_COST * pages)
+
+    task_ids = []
+    for page in range(start, end + 1):
+        res =celery.send_task(
+            "tasks.process_page",
+            args=[job_id, job["remote_pdf_path"], page]
+        )
+        task_ids.append(res.id)
+
+    # 🔥 AUTO MERGE
+    celery.send_task("tasks.merge_pages", args=[job_id])
+
+    return {
+        "status": "processing", 
+        "pages": pages,
+        "job_id": job_id,
+        "task_ids": task_ids,
+    }
