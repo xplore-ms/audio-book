@@ -1,14 +1,32 @@
+# Core
 fastapi
 uvicorn[standard]
+python-dotenv
+python-multipart
+httpx
+
+# Auth & Security
+passlib[bcrypt]
+python-jose[cryptography]
+
+# Background jobs
 celery
 redis
-python-dotenv
-pymupdf
-google-genai
-edge-tts
-pydub
-# boto3
+
+# Database
 pymongo
-httpx
-python-multipart
+
+# PDF processing
+pymupdf
+
+# Audio
+pydub
+
+# AI
+google-genai
+
+# Storage
 supabase
+
+# Utilities
+email-validator
