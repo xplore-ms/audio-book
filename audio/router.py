@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from supabase_client import download_to_bytes
 from mongo import jobs_collection
@@ -37,9 +37,13 @@ def get_pages(job_id: str, user=Depends(get_current_user)):
     return {"pages": job["pages"]}
 
 
-@router.get("/stream/{job_id}")
-def stream_audio(job_id: str, user=Depends(get_current_user)):
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+@router.get("/download/{job_id}")
+def download_audio(job_id: str, token: str = Query(...)):
+    user = get_current_user(token)
+
+    job = jobs_collection.find_one(
+        {"job_id": job_id, "user_id": user["_id"]}
+    )
     if not job or "final_parts" not in job:
         raise HTTPException(status_code=404, detail="Audio not available")
 
@@ -48,11 +52,19 @@ def stream_audio(job_id: str, user=Depends(get_current_user)):
         for part_url in job["final_parts"]:
             audio_bytes = download_to_bytes(part_url)
             if not first:
-                audio_bytes = audio_bytes[44:]  # remove WAV header
+                audio_bytes = audio_bytes[44:]
             first = False
             yield audio_bytes
 
-    return StreamingResponse(iter_audio(), media_type="audio/wav")
+    filename = f"{job.get('folder_name', job_id)}.wav"
+
+    return StreamingResponse(
+        iter_audio(),
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
 
 
 
