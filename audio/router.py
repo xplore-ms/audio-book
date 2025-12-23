@@ -1,15 +1,17 @@
 from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from supabase_client import download_to_bytes
 from mongo import jobs_collection
 from core.dependencies import get_current_user
+import io
 import os
-
 from dotenv import load_dotenv
+
 load_dotenv()
 router = APIRouter(prefix="/audio", tags=["Audio"])
 
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "reading_app")
+
 
 @router.get("/my")
 def my_audios(user=Depends(get_current_user)):
@@ -23,107 +25,91 @@ def my_audios(user=Depends(get_current_user)):
     return list(jobs)
 
 
+@router.get("/pages/{job_id}")
+def get_pages(job_id: str, user=Depends(get_current_user)):
+    """
+    Fetch per-page info (audio URL, sync URL, duration) for a job
+    """
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    if not job or "pages" not in job:
+        raise HTTPException(status_code=404, detail="Pages info not found")
+
+    return {"pages": job["pages"]}
+
+
+@router.get("/stream/{job_id}")
+def stream_audio(job_id: str, user=Depends(get_current_user)):
+    """
+    Stream the full audiobook audio from final parts.
+    """
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    if not job or "final_parts" not in job:
+        raise HTTPException(status_code=404, detail="Audio not available")
+
+    def iter_audio():
+        for part_url in job["final_parts"]:
+            audio_bytes = download_to_bytes(part_url)
+            yield audio_bytes
+
+    return StreamingResponse(iter_audio(), media_type="audio/wav")
+
+
 @router.get("/sync/{job_id}")
 def get_sync(job_id: str, user=Depends(get_current_user)):
     """
-    Fetch per-page sync JSON for a given job.
+    Return per-page sync info for the frontend to build dynamic global sync.
+    """
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    if not job or "pages" not in job:
+        raise HTTPException(status_code=404, detail="Sync info not available")
+
+    return JSONResponse({"pages": job["pages"]})
+
+
+@router.get("/download/{job_id}")
+def download_audio(job_id: str, user=Depends(get_current_user)):
+    """
+    Download the full audiobook (merged on-the-fly from final_parts) as a single WAV file.
+    """
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    if not job or "final_parts" not in job:
+        raise HTTPException(status_code=404, detail="Audio not available")
+
+    def iter_audio():
+        first_chunk = True
+        for part_url in job["final_parts"]:
+            audio_bytes = download_to_bytes(part_url)
+            
+            if not first_chunk:
+                # Remove WAV header for all chunks after the first
+                audio_bytes = audio_bytes[44:]
+            else:
+                first_chunk = False
+
+            yield audio_bytes
+
+    filename = f"{job.get('folder_name', job_id)}.wav"
+
+    return StreamingResponse(
+        iter_audio(),
+        media_type="audio/wav",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+@router.get("/stream/page/{job_id}/{page}")
+def stream_page_audio(job_id: str, page: str, user=Depends(get_current_user)):
+    """
+    Stream a single page’s audio.
     """
     job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job.get("sync", {})
+
+    audio_url = job.get("pages", {}).get(page, {}).get("audio_url")
+    if not audio_url:
+        raise HTTPException(status_code=404, detail="Audio for this page not found")
+
+    audio_bytes = download_to_bytes(audio_url)
+    return StreamingResponse(io.BytesIO(audio_bytes), media_type="audio/wav")
 
 
-@router.get("/sync/global/{job_id}")
-def get_global_sync(job_id: str, user=Depends(get_current_user)):
-    """
-    Fetch global sync JSON for a given job.
-    """
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
-    if not job or "global_sync_url" not in job:
-        raise HTTPException(status_code=404, detail="Global sync not available")
-    return {"global_sync_url": job["global_sync_url"]}
-
-@router.get("/api/audio/stream")
-def stream_audio(token: str):
-    job = jobs_collection.find_one({"access_token": token})
-    if not job:
-        raise HTTPException(status_code=403, detail="Invalid or expired token")
-
-    final_parts = job.get("final_parts", [])
-    if not final_parts:
-        raise HTTPException(status_code=404, detail="Audio not found")
-
-    def extract_storage_path(public_url: str) -> str:
-        """
-        Converts:
-        https://xxx.supabase.co/storage/v1/object/public/reading_app/pdfs/abc.wav
-
-        To:
-        pdfs/abc.wav
-        """
-        marker = f"/storage/v1/object/public/{SUPABASE_BUCKET}/"
-        if marker not in public_url:
-            raise RuntimeError("Invalid Supabase public URL format")
-        return public_url.split(marker, 1)[1]
-
-    def audio_generator():
-        for idx, public_url in enumerate(final_parts):
-            storage_path = extract_storage_path(public_url)
-
-            audio_bytes = download_to_bytes(storage_path)
-
-            # Strip WAV header for all except first
-            if idx > 0:
-                audio_bytes = audio_bytes[44:]
-
-            yield audio_bytes
-
-    return StreamingResponse(
-        audio_generator(),
-        media_type="audio/wav",
-        headers={
-            "Cache-Control": "no-store",
-            "Content-Disposition": "inline; filename=audiobook.wav"
-        }
-    )
-
-@router.get("/api/audio/download")
-def download_audio(token: str):
-    job = jobs_collection.find_one({"access_token": token})
-    if not job:
-        raise HTTPException(status_code=403, detail="Invalid or expired token")
-
-    final_parts = job.get("final_parts", [])
-    if not final_parts:
-        raise HTTPException(status_code=404, detail="Audio not found")
-
-    def extract_storage_path(public_url: str) -> str:
-        marker = f"/storage/v1/object/public/{SUPABASE_BUCKET}/"
-        if marker not in public_url:
-            raise RuntimeError("Invalid Supabase public URL format")
-        return public_url.split(marker, 1)[1]
-
-    output = io.BytesIO()
-
-    for idx, public_url in enumerate(final_parts):
-        storage_path = extract_storage_path(public_url)
-        audio_bytes = download_to_bytes(storage_path)
-
-        # Remove WAV header for all except first
-        if idx > 0:
-            audio_bytes = audio_bytes[44:]
-
-        output.write(audio_bytes)
-
-    output.seek(0)
-
-    return StreamingResponse(
-        output,
-        media_type="audio/wav",
-        headers={
-            "Content-Disposition": "attachment; filename=audiobook.wav",
-            "Content-Length": str(output.getbuffer().nbytes),
-            "Cache-Control": "no-store"
-        }
-    )
