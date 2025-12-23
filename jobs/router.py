@@ -94,3 +94,8 @@ def start_job(
         "job_id": job_id,
         "task_ids": task_ids,
     }
+
+@router.get("/status/{task_id}")
+def get_status(task_id: str):
+    async_result = celery.AsyncResult(task_id)
+    return {"state": async_result.state, "result": async_result.result}
