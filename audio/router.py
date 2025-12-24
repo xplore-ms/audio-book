@@ -46,20 +46,28 @@ def stream_audio(job_id: str, token: str = Query(...)):
     if not job or "final_parts" not in job:
         raise HTTPException(status_code=404, detail="Audio not available")
 
+    def extract_storage_path(public_url: str) -> str:
+        marker = f"/storage/v1/object/public/{SUPABASE_BUCKET}/"
+        if marker not in public_url:
+            raise RuntimeError("Invalid Supabase public URL format")
+        return public_url.split(marker, 1)[1]
+
     def iter_audio():
         first = True
         for part_url in job["final_parts"]:
-            audio_bytes = download_to_bytes(part_url)
+            storage_path = extract_storage_path(part_url)
+            audio_bytes = download_to_bytes(storage_path)
+
             if not first:
                 audio_bytes = audio_bytes[44:]  # strip WAV header
             first = False
+
             yield audio_bytes
 
     return StreamingResponse(
         iter_audio(),
         media_type="audio/wav",
         headers={
-            "Accept-Ranges": "bytes",
             "Cache-Control": "no-store"
         }
     )
