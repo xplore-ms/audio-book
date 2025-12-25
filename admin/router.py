@@ -120,7 +120,7 @@ def start_admin_job(
     task_ids = []
     for page in range(start, end + 1):
         task = celery.send_task(
-            "tasks.process_page_with_sync",
+            "tasks.process_page",
             args=[job_id, job["remote_pdf_path"], page]
         )
         task_ids.append(task.id)
