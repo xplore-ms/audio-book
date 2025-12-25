@@ -115,11 +115,9 @@ def request_full_review(
     if not job:
         raise HTTPException(404, "Job not found")
 
-    # Prevent duplicate requests
     if job.get("review_required"):
         raise HTTPException(400, "Review already requested")
 
-    # Mark job as requiring manual review
     jobs_collection.update_one(
         {"job_id": job_id},
         {"$set": {
@@ -129,25 +127,17 @@ def request_full_review(
         }}
     )
 
-    # Send email to YOU
-    send_email(
-        to_email=MAIL_USERNAME,
-        subject="📄 Manual PDF Processing Requested",
-        message=f"""
-        <h3>Manual Processing Requested</h3>
-        <p><strong>Job ID:</strong> {job_id}</p>
-        <p><strong>User Email:</strong> {job['email']}</p>
-        <p><strong>Pages:</strong> {job['num_pages']}</p>
-        <p>This job requires manual review before processing.</p>
-        """,
-        sender_email=MAIL_USERNAME,
-        sender_password=MAIL_PASSWORD
+    # 🔥 SEND EMAIL ASYNC (NO BLOCKING)
+    celery.send_task(
+        "tasks.send_review_request_email",
+        args=[job_id]
     )
 
     return {
         "status": "queued_for_review",
         "job_id": job_id
     }
+
 
 @router.get("/status/{task_id}")
 def get_status(task_id: str):
