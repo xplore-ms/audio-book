@@ -143,3 +143,17 @@ def request_full_review(
 def get_status(task_id: str):
     async_result = celery.AsyncResult(task_id)
     return {"state": async_result.state, "result": async_result.result}
+
+
+@router.get("/me/activity")
+def my_activity(user=Depends(get_current_user)):
+    jobs = jobs_collection.find(
+        {"user_id": user["_id"]},
+        {"_id": 0, "job_id": 1, "num_pages": 1, "created_at": 1, "review_status": 1}
+    )
+
+    return {
+        "email": user["email"],
+        "credits": user["credits"],
+        "jobs": list(jobs)
+    }

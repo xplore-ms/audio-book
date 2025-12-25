@@ -91,9 +91,16 @@ def start_admin_job(
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    job = jobs_collection.find_one({"job_id": job_id, "is_admin": True})
+    job = jobs_collection.find_one({"job_id": job_id})
     if not job:
         raise HTTPException(status_code=404, detail="Admin job not found")
+
+    # Block processing if review is required but not approved
+    if job.get("review_required") and job.get("review_status") != "approved":
+        raise HTTPException(
+            status_code=403,
+            detail="Job requires admin approval before processing"
+        )
 
     total_pages = job.get("num_pages", 0)
     end = end or total_pages
@@ -125,6 +132,178 @@ def start_admin_job(
         "total_pages": total_pages
     }
 
+@router.get("/metrics/overview")
+def admin_metrics_overview(user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    total_users = users_collection.count_documents({})
+    total_jobs = jobs_collection.count_documents({})
+
+    users_with_credits = users_collection.count_documents({
+        "credits": {"$gt": 0}
+    })
+
+    review_pending = jobs_collection.count_documents({
+        "review_status": "pending"
+    })
+
+    review_done = jobs_collection.count_documents({
+        "review_status": "done"
+    })
+
+    return {
+        "users": {
+            "total": total_users,
+            "with_credits": users_with_credits
+        },
+        "jobs": {
+            "total": total_jobs,
+            "review_pending": review_pending,
+            "review_done": review_done
+        }
+    }
+
+from datetime import timedelta
+
+@router.get("/metrics/users")
+def admin_user_metrics(user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    now = datetime.utcnow()
+
+    last_7_days = users_collection.count_documents({
+        "created_at": {"$gte": now - timedelta(days=7)}
+    })
+
+    last_30_days = users_collection.count_documents({
+        "created_at": {"$gte": now - timedelta(days=30)}
+    })
+
+    total_credits = list(users_collection.aggregate([
+        {"$group": {"_id": None, "total": {"$sum": "$credits"}}}
+    ]))
+
+    total_credits = total_credits[0]["total"] if total_credits else 0
+
+    return {
+        "new_users": {
+            "last_7_days": last_7_days,
+            "last_30_days": last_30_days
+        },
+        "credits": {
+            "total_remaining": total_credits
+        }
+    }
+
+@router.get("/metrics/activity")
+def admin_activity_metrics(user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    pipeline = [
+        {
+            "$group": {
+                "_id": "$user_id",
+                "jobs_created": {"$sum": 1},
+                "pages": {"$sum": "$num_pages"}
+            }
+        },
+        {
+            "$sort": {"jobs_created": -1}
+        },
+        {
+            "$limit": 10
+        }
+    ]
+
+    top_users = list(jobs_collection.aggregate(pipeline))
+
+    return {
+        "top_active_users": [
+            {
+                "user_id": str(u["_id"]),
+                "jobs_created": u["jobs_created"],
+                "pages_processed": u["pages"]
+            }
+            for u in top_users
+        ]
+    }
+
+
+@router.post("/approve-review")
+def approve_review(
+    job_id: str = Form(...),
+    user=Depends(get_current_user)
+):
+    # Admin only
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    job = jobs_collection.find_one({
+        "job_id": job_id,
+        "review_required": True,
+        "review_status": "pending"
+    })
+
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail="Pending review job not found"
+        )
+
+    jobs_collection.update_one(
+        {"job_id": job_id},
+        {"$set": {
+            "review_status": "approved",
+            "review_approved_at": datetime.utcnow(),
+            "review_approved_by": user["_id"]
+        }}
+    )
+
+    return {
+        "status": "approved",
+        "job_id": job_id
+    }
+
+@router.post("/process-done")
+def done_processing(
+    job_id: str = Form(...),
+    user=Depends(get_current_user)
+):
+    # Admin only
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    job = jobs_collection.find_one({
+        "job_id": job_id,
+        "review_required": True
+    })
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("review_status") != "approved":
+        raise HTTPException(
+            status_code=400,
+            detail="Job is not in approved state"
+        )
+
+    jobs_collection.update_one(
+        {"job_id": job_id},
+        {"$set": {
+            "review_status": "done",
+            "review_done_at": datetime.utcnow(),
+            "review_done_by": user["_id"]
+        }}
+    )
+
+    return {
+        "status": "done",
+        "job_id": job_id
+    }
+
 
 # -------------------------
 # ADMIN: List completed audiobooks
@@ -139,74 +318,6 @@ def my_library(user=Depends(get_current_user)):
         {"_id": 0, "job_id": 1, "final_parts": 1, "final_size_mb": 1, "required_credits": 1}
     )
     return list(jobs)
-
-# -------------------------
-# PUBLIC: List all audiobooks
-# -------------------------
-public_router = APIRouter(prefix="/public", tags=["Public Library"])
-
-@public_router.get("/")
-def list_public_audios():
-    """
-    Return all audiobooks from admin library that are ready
-    """
-    jobs = jobs_collection.find(
-        {"is_admin": True, "final_parts": {"$exists": True}},
-        {"_id": 0, "job_id": 1, "final_parts": 1, "final_size_mb": 1, "required_credits": 1}
-    )
-    return list(jobs)
-
-
-# -------------------------
-# PUBLIC: Stream audio (requires credits)
-# -------------------------
-@public_router.get("/listen/{job_id}")
-def stream_public_audio(job_id: str, user=Depends(get_current_user)):
-    job = jobs_collection.find_one({"job_id": job_id, "is_admin": True})
-    if not job or "final_parts" not in job:
-        raise HTTPException(status_code=404, detail="Audio not found")
-
-    user_doc = users_collection.find_one({"_id": user["_id"]})
-    user_credits = user_doc.get("credits", 0)
-    required = job.get("required_credits", 1)
-
-    if user_credits < required:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Not enough credits. Required: {required}, you have: {user_credits}"
-        )
-
-    # Deduct credits
-    users_collection.update_one(
-        {"_id": user["_id"]},
-        {"$inc": {"credits": -required}}
-    )
-
-    final_parts = job["final_parts"]
-
-    def extract_storage_path(public_url: str) -> str:
-        marker = f"/storage/v1/object/public/admin_library/"
-        if marker not in public_url:
-            raise RuntimeError("Invalid Supabase public URL format")
-        return public_url.split(marker, 1)[1]
-
-    def audio_generator():
-        for idx, public_url in enumerate(final_parts):
-            storage_path = extract_storage_path(public_url)
-            audio_bytes = download_to_bytes(storage_path)
-            if idx > 0:
-                audio_bytes = audio_bytes[44:]  # strip WAV header
-            yield audio_bytes
-
-    from fastapi.responses import StreamingResponse
-    return StreamingResponse(
-        audio_generator(),
-        media_type="audio/wav",
-        headers={
-            "Cache-Control": "no-store",
-            "Content-Disposition": "inline; filename=audiobook.wav"
-        }
-    )
 
 @router.get("/reviews")
 def list_review_requests(user=Depends(get_current_user)):
@@ -289,19 +400,3 @@ def admin_login(
         "token_type": "bearer",
         "role": "admin"
     }
-# -------------------------
-# PUBLIC: Fetch sync timestamps
-# -------------------------
-@public_router.get("/sync/{job_id}")
-def get_sync(job_id: str):
-    job = jobs_collection.find_one({"job_id": job_id})
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job.get("sync", {})  # per-page timestamp sync
-
-@public_router.get("/sync/global/{job_id}")
-def get_global_sync(job_id: str):
-    job = jobs_collection.find_one({"job_id": job_id})
-    if not job or "global_sync_url" not in job:
-        raise HTTPException(status_code=404, detail="Global sync not available")
-    return {"global_sync_url": job["global_sync_url"]}
