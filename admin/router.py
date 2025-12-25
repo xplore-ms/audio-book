@@ -328,7 +328,7 @@ def list_review_requests(user=Depends(get_current_user)):
         {
             "$match": {
                 "review_required": True,
-                "review_status": "pending",
+                "review_status": {"$in": ["pending", "approved", "done"]},
                 "is_admin": {"$ne": True}
             }
         },
@@ -347,9 +347,13 @@ def list_review_requests(user=Depends(get_current_user)):
                 "job_id": 1,
                 "num_pages": 1,
                 "requested_at": 1,
+                "review_status": 1,        # 👈 important for frontend
                 "user_email": "$user.email",
                 "user_credits": "$user.credits"
             }
+        },
+        {
+            "$sort": {"requested_at": -1}  # 👈 newest first (recommended)
         }
     ]
 
