@@ -1,14 +1,20 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from mongo import jobs_collection, users_collection
 from supabase_client import upload_bytes, download_to_bytes, get_url, list_files
+from core.security import (
+    hash_password,
+    verify_password,
+    create_access_token
+)
 from pdf_utils import get_num_pages_from_bytes
 from core.dependencies import get_current_user
-from celery_app import celery_app
+from celery import Celery
 from datetime import datetime
 import uuid
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
+celery = Celery("worker")
 SUPABASE_ADMIN_FOLDER = "admin_library"
 MAX_PAGES_AT_ONCE = 50  # safety limit for batch processing
 
@@ -106,7 +112,7 @@ def start_admin_job(
     # Trigger Celery tasks for each page
     task_ids = []
     for page in range(start, end + 1):
-        task = celery_app.send_task(
+        task = celery.send_task(
             "tasks.process_page_with_sync",
             args=[job_id, job["remote_pdf_path"], page]
         )
@@ -133,7 +139,6 @@ def my_library(user=Depends(get_current_user)):
         {"_id": 0, "job_id": 1, "final_parts": 1, "final_size_mb": 1, "required_credits": 1}
     )
     return list(jobs)
-
 
 # -------------------------
 # PUBLIC: List all audiobooks
@@ -203,7 +208,87 @@ def stream_public_audio(job_id: str, user=Depends(get_current_user)):
         }
     )
 
+@router.get("/reviews")
+def list_review_requests(user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
 
+    pipeline = [
+        {
+            "$match": {
+                "review_required": True,
+                "review_status": "pending",
+                "is_admin": {"$ne": True}
+            }
+        },
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "user_id",
+                "foreignField": "_id",
+                "as": "user"
+            }
+        },
+        {"$unwind": "$user"},
+        {
+            "$project": {
+                "_id": 0,
+                "job_id": 1,
+                "num_pages": 1,
+                "requested_at": 1,
+                "user_email": "$user.email",
+                "user_credits": "$user.credits"
+            }
+        }
+    ]
+
+    return list(jobs_collection.aggregate(pipeline))
+
+@router.post("/create-admin")
+def create_admin_user(
+    email: str = Form(...),
+    password: str = Form(...),
+    user=Depends(get_current_user)
+):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if users_collection.find_one({"email": email}):
+        raise HTTPException(400, "Email already exists")
+
+    users_collection.insert_one({
+        "email": email,
+        "password_hash": hash_password(password),
+        "credits": 0,
+        "role": "admin",
+        "created_at": datetime.utcnow()
+    })
+
+    return {"message": "Admin user created successfully"}
+
+@router.post("/login")
+def admin_login(
+    email: str = Form(...),
+    password: str = Form(...)
+):
+    admin = users_collection.find_one({
+        "email": email,
+        "role": "admin"
+    })
+
+    if not admin:
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+
+    if not verify_password(password, admin["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+
+    token = create_access_token(email)
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "role": "admin"
+    }
 # -------------------------
 # PUBLIC: Fetch sync timestamps
 # -------------------------

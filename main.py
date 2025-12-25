@@ -6,6 +6,8 @@ from jobs.router import router as jobs_router
 from audio.router import router as audio_router
 from credits.router import router as credits_router
 from health.router import router as health_router
+from admin.router import router as admin_router
+from admin.public_router import public_router
 
 from mongo import ensure_indexes
 
@@ -21,3 +23,5 @@ app.include_router(credits_router)
 app.include_router(jobs_router)
 app.include_router(audio_router)
 app.include_router(health_router)
+app.include_router(admin_router)
+app.include_router(public_router)

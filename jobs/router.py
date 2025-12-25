@@ -14,7 +14,18 @@ from pdf_utils import get_num_pages_from_bytes
 from mongo import jobs_collection
 from celery import Celery
 from core.config import MAX_UPLOAD_SIZE, MAX_PAGES
+import os
+from dotenv import load_dotenv
 
+# -----------------------------
+# Utilities for TTS sync
+# -----------------------------
+
+from email_utils import send_email
+
+load_dotenv()
+MAIL_USERNAME = os.getenv("MAIL_USERNAME")
+MAIL_PASSWORD = os.getenv("MAIL_PASSWORD")
 router = APIRouter(prefix="", tags=["Jobs"])
 
 celery = Celery("worker")
@@ -93,6 +104,49 @@ def start_job(
         "pages": pages,
         "job_id": job_id,
         "task_ids": task_ids,
+    }
+
+@router.post("/request-full-review")
+def request_full_review(
+    job_id: str,
+    user=Depends(get_current_user)
+):
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    # Prevent duplicate requests
+    if job.get("review_required"):
+        raise HTTPException(400, "Review already requested")
+
+    # Mark job as requiring manual review
+    jobs_collection.update_one(
+        {"job_id": job_id},
+        {"$set": {
+            "review_required": True,
+            "review_status": "pending",
+            "requested_at": datetime.utcnow()
+        }}
+    )
+
+    # Send email to YOU
+    send_email(
+        to_email=MAIL_USERNAME,
+        subject="📄 Manual PDF Processing Requested",
+        message=f"""
+        <h3>Manual Processing Requested</h3>
+        <p><strong>Job ID:</strong> {job_id}</p>
+        <p><strong>User Email:</strong> {job['email']}</p>
+        <p><strong>Pages:</strong> {job['num_pages']}</p>
+        <p>This job requires manual review before processing.</p>
+        """,
+        sender_email=MAIL_USERNAME,
+        sender_password=MAIL_PASSWORD
+    )
+
+    return {
+        "status": "queued_for_review",
+        "job_id": job_id
     }
 
 @router.get("/status/{task_id}")

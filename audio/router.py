@@ -115,35 +115,6 @@ def get_sync(job_id: str, user=Depends(get_current_user)):
     return JSONResponse({"pages": job["pages"]})
 
 
-@router.get("/download/{job_id}")
-def download_audio(job_id: str, user=Depends(get_current_user)):
-    """
-    Download the full audiobook (merged on-the-fly from final_parts) as a single WAV file.
-    """
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
-    if not job or "final_parts" not in job:
-        raise HTTPException(status_code=404, detail="Audio not available")
-
-    def iter_audio():
-        first_chunk = True
-        for part_url in job["final_parts"]:
-            audio_bytes = download_to_bytes(part_url)
-            
-            if not first_chunk:
-                # Remove WAV header for all chunks after the first
-                audio_bytes = audio_bytes[44:]
-            else:
-                first_chunk = False
-
-            yield audio_bytes
-
-    filename = f"{job.get('folder_name', job_id)}.wav"
-
-    return StreamingResponse(
-        iter_audio(),
-        media_type="audio/wav",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
 
 @router.get("/stream/page/{job_id}/{page}")
 def stream_page_audio(job_id: str, page: str, user=Depends(get_current_user)):
