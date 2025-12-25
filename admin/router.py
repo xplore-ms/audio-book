@@ -15,6 +15,8 @@ import uuid
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 celery = Celery("worker")
+celery.config_from_object("celeryconfig")
+
 SUPABASE_ADMIN_FOLDER = "admin_library"
 MAX_PAGES_AT_ONCE = 50  # safety limit for batch processing
 
