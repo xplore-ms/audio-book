@@ -69,3 +69,9 @@ def list_files(folder: str):
                 break
             offset += limit
         return items
+
+def extract_storage_path(public_url: str) -> str:
+    marker = f"/storage/v1/object/public/{SUPABASE_BUCKET}/"
+    if marker not in public_url:
+        raise ValueError("Invalid Supabase public URL")
+    return public_url.split(marker, 1)[1]

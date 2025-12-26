@@ -1,14 +1,16 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse, JSONResponse
-from supabase_client import download_to_bytes
+from supabase_client import download_to_bytes, extract_storage_path
 from mongo import jobs_collection
 from core.dependencies import get_current_user
 import io
 import os
+import wave
 from dotenv import load_dotenv
 
 load_dotenv()
 router = APIRouter(prefix="/audio", tags=["Audio"])
+WAV_HEADER_SIZE = 44
 
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "reading_app")
 
@@ -37,39 +39,58 @@ def get_pages(job_id: str, user=Depends(get_current_user)):
     return {"pages": job["pages"]}
 
 @router.get("/stream/{job_id}")
-def stream_audio(job_id: str, token: str = Query(...)):
+def stream_wav(job_id: str, token: str = Query(...)):
     user = get_current_user(token)
 
-    job = jobs_collection.find_one(
-        {"job_id": job_id, "user_id": user["_id"]}
-    )
-    if not job or "final_parts" not in job:
-        raise HTTPException(status_code=404, detail="Audio not available")
+    job = jobs_collection.find_one({
+        "job_id": job_id,
+        "user_id": user["_id"]
+    })
+    if not job:
+        raise HTTPException(404, "Job not found")
 
-    def extract_storage_path(public_url: str) -> str:
-        marker = f"/storage/v1/object/public/{SUPABASE_BUCKET}/"
-        if marker not in public_url:
-            raise RuntimeError("Invalid Supabase public URL format")
-        return public_url.split(marker, 1)[1]
+    pages = job.get("pages", {})
+    if not pages:
+        raise HTTPException(404, "No audio pages")
 
-    def iter_audio():
-        first = True
-        for part_url in job["final_parts"]:
-            storage_path = extract_storage_path(part_url)
-            audio_bytes = download_to_bytes(storage_path)
+    def page_sort_key(item):
+        return int(item[0].split("_")[-1])
 
-            if not first:
-                audio_bytes = audio_bytes[44:]  # strip WAV header
-            first = False
+    ordered_pages = sorted(pages.items(), key=page_sort_key)
 
-            yield audio_bytes
+    # ---- First pass: read params + total size ----
+    pcm_chunks = []
+    params = None
+    total_frames = 0
+
+    for _, page in ordered_pages:
+        wav_bytes = download_to_bytes(
+            extract_storage_path(page["audio_url"])
+        )
+
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            if params is None:
+                params = w.getparams()
+
+            frames = w.readframes(w.getnframes())
+            pcm_chunks.append(frames)
+            total_frames += w.getnframes()
+
+    # ---- Build ONE correct WAV stream ----
+    def wav_stream():
+        out = io.BytesIO()
+        with wave.open(out, "wb") as writer:
+            writer.setparams(params)
+            for chunk in pcm_chunks:
+                writer.writeframes(chunk)
+
+        out.seek(0)
+        yield from iter(lambda: out.read(8192), b"")
 
     return StreamingResponse(
-        iter_audio(),
+        wav_stream(),
         media_type="audio/wav",
-        headers={
-            "Cache-Control": "no-store"
-        }
+        headers={"Cache-Control": "no-store"}
     )
 
 @router.get("/download/{job_id}")

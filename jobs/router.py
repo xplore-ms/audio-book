@@ -97,7 +97,7 @@ def start_job(
         task_ids.append(res.id)
 
     # 🔥 AUTO MERGE
-    celery.send_task("tasks.merge_pages", args=[job_id])
+    # celery.send_task("tasks.merge_pages", args=[job_id])
 
     return {
         "status": "processing", 
