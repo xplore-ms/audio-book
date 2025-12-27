@@ -21,8 +21,8 @@ def my_audios(user=Depends(get_current_user)):
     Fetch all completed audios for the authenticated user
     """
     jobs = jobs_collection.find(
-        {"user_id": user["_id"], "final_parts": {"$exists": True}},
-        {"_id": 0, "job_id": 1, "final_parts": 1, "final_size_mb": 1}
+        {"user_id": user["_id"]},
+        {"_id": 0, "job_id": 1}
     )
     return list(jobs)
 
@@ -44,7 +44,7 @@ def stream_wav(job_id: str, token: str = Query(...)):
 
     job = jobs_collection.find_one({
         "job_id": job_id,
-        "user_id": user["_id"]
+        # "user_id": user["_id"]
     })
     if not job:
         raise HTTPException(404, "Job not found")
@@ -100,25 +100,46 @@ def download_audio(job_id: str, token: str = Query(...)):
     job = jobs_collection.find_one(
         {"job_id": job_id, "user_id": user["_id"]}
     )
-    if not job or "final_parts" not in job:
+    if not job or "pages" not in job:
         raise HTTPException(status_code=404, detail="Audio not available")
 
-    def iter_audio():
-        first = True
-        for part_url in job["final_parts"]:
-            audio_bytes = download_to_bytes(part_url)
-            if not first:
-                audio_bytes = audio_bytes[44:]
-            first = False
-            yield audio_bytes
+    pages = job["pages"]
+
+    def page_sort_key(item):
+        return int(item[0].split("_")[-1])
+
+    ordered_pages = sorted(pages.items(), key=page_sort_key)
+
+    pcm_chunks = []
+    params = None
+
+    for _, page in ordered_pages:
+        wav_bytes = download_to_bytes(
+            extract_storage_path(page["audio_url"])
+        )
+
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            if params is None:
+                params = w.getparams()
+            pcm_chunks.append(w.readframes(w.getnframes()))
+
+    def wav_file():
+        out = io.BytesIO()
+        with wave.open(out, "wb") as writer:
+            writer.setparams(params)
+            for chunk in pcm_chunks:
+                writer.writeframes(chunk)
+        out.seek(0)
+        yield from iter(lambda: out.read(8192), b"")
 
     filename = f"{job.get('folder_name', job_id)}.wav"
 
     return StreamingResponse(
-        iter_audio(),
+        wav_file(),
         media_type="audio/wav",
         headers={
-            "Content-Disposition": f"attachment; filename={filename}"
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store"
         }
     )
 
@@ -129,7 +150,9 @@ def get_sync(job_id: str, user=Depends(get_current_user)):
     """
     Return per-page sync info for the frontend to build dynamic global sync.
     """
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    job = jobs_collection.find_one({"job_id": job_id,
+                                     "user_id": user["_id"]
+                                    })
     if not job or "pages" not in job:
         raise HTTPException(status_code=404, detail="Sync info not available")
 

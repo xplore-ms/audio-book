@@ -74,12 +74,47 @@ async def upload_pdf(
         "required_credits": required_credits
     }
 
+@router.post("/start-admin-job")
+def start_job(
+    job_id: str,
+    start: int = 1,
+    end: int | None = None,
+    user=Depends(get_current_user)
+):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    total = job["num_pages"]
+    end = end or total
+    pages = end - start + 1
+
+    if pages > MAX_PAGES_AT_ONCE:
+        raise HTTPException(400, "Page limit exceeded")
+
+    task_ids = []
+    for page in range(start, end + 1):
+        res =celery.send_task(
+            "tasks.process_admin_page",
+            args=[job_id, job["remote_pdf_path"], page]
+        )
+        task_ids.append(res.id)
+
+    return {
+        "status": "processing", 
+        "pages": pages,
+        "job_id": job_id,
+        "task_ids": task_ids,
+    }
 
 # -------------------------
 # ADMIN: Start processing PDF → audio
 # -------------------------
 @router.post("/process-job")
-def start_admin_job(
+def start_admin_request_job(
     job_id: str = Form(...),
     start: int = Form(1),
     end: int = Form(None),
@@ -95,7 +130,7 @@ def start_admin_job(
 
     job = jobs_collection.find_one({"job_id": job_id})
     if not job:
-        raise HTTPException(status_code=404, detail="Admin job not found")
+        raise HTTPException(status_code=404, detail="User job not found")
 
     # Block processing if review is required but not approved
     if job.get("review_required") and job.get("review_status") != "approved":
