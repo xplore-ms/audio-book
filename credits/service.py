@@ -4,6 +4,7 @@ from mongo import users_collection
 
 
 UPLOAD_COST = 10
+DOWNLOAD_COST = 20
 PAGE_COST = 1
 
 DAILY_LOGIN_REWARD = 5

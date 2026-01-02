@@ -1,6 +1,11 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from supabase_client import download_to_bytes, extract_storage_path
+from credits.service import  (
+    require_credits,
+    deduct_credits,
+    DOWNLOAD_COST
+)
 from mongo import jobs_collection
 from core.dependencies import get_current_user
 import io
@@ -104,6 +109,9 @@ def download_audio(job_id: str, token: str = Query(...)):
         raise HTTPException(status_code=404, detail="Audio not available")
 
     pages = job["pages"]
+
+    require_credits(user, DOWNLOAD_COST)
+    deduct_credits(user["_id"], DOWNLOAD_COST)
 
     def page_sort_key(item):
         return int(item[0].split("_")[-1])
