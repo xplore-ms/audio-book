@@ -1,15 +1,20 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from mongo import jobs_collection, users_collection
-from supabase_client import upload_bytes, download_to_bytes, get_url, list_files
+from supabase_client import upload_bytes
 from core.security import (
     hash_password,
     verify_password,
     create_access_token
 )
+from credits.service import  (
+    require_credits,
+    deduct_credits,
+    PAGE_COST
+)
 from pdf_utils import get_num_pages_from_bytes
 from core.dependencies import get_current_user
 from celery import Celery
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -19,6 +24,11 @@ celery.config_from_object("celeryconfig")
 
 SUPABASE_ADMIN_FOLDER = "admin_library"
 MAX_PAGES_AT_ONCE = 50  # safety limit for batch processing
+
+REVIEW_TAG = "Review Workflow"
+PROCESSING_TAG = "Processing"
+EMAIL_TAG = "Email Notifications"
+ADMIN_TAG = "Admin"
 
 def make_folder_name(job_id: str) -> str:
     return f"{datetime.utcnow().strftime('%Y%m%d')}_{job_id}"
@@ -110,64 +120,6 @@ def start_job(
         "task_ids": task_ids,
     }
 
-# -------------------------
-# ADMIN: Start processing PDF → audio
-# -------------------------
-@router.post("/process-job")
-def start_admin_request_job(
-    job_id: str = Form(...),
-    start: int = Form(1),
-    end: int = Form(None),
-    user=Depends(get_current_user)
-):
-    """
-    Trigger Celery tasks to process admin job pages.
-    Allows start/end to prevent Redis/worker crash.
-    No credit deduction.
-    """
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-    job = jobs_collection.find_one({"job_id": job_id})
-    if not job:
-        raise HTTPException(status_code=404, detail="User job not found")
-
-    # Block processing if review is required but not approved
-    if job.get("review_required") and job.get("review_status") != "approved":
-        raise HTTPException(
-            status_code=403,
-            detail="Job requires admin approval before processing"
-        )
-
-    total_pages = job.get("num_pages", 0)
-    end = end or total_pages
-
-    if start < 1 or end > total_pages or start > end:
-        raise HTTPException(status_code=400, detail="Invalid page range")
-
-    pages_requested = end - start + 1
-    if pages_requested > MAX_PAGES_AT_ONCE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Too many pages requested at once ({pages_requested}). "
-                   f"Max allowed per batch: {MAX_PAGES_AT_ONCE}"
-        )
-
-    # Trigger Celery tasks for each page
-    task_ids = []
-    for page in range(start, end + 1):
-        task = celery.send_task(
-            "tasks.process_page",
-            args=[job_id, job["remote_pdf_path"], page]
-        )
-        task_ids.append(task.id)
-
-    return {
-        "job_id": job_id,
-        "task_ids": task_ids,
-        "pages_processing": pages_requested,
-        "total_pages": total_pages
-    }
 
 @router.get("/metrics/overview")
 def admin_metrics_overview(user=Depends(get_current_user)):
@@ -200,8 +152,6 @@ def admin_metrics_overview(user=Depends(get_current_user)):
             "review_done": review_done
         }
     }
-
-from datetime import timedelta
 
 @router.get("/metrics/users")
 def admin_user_metrics(user=Depends(get_current_user)):
@@ -269,12 +219,77 @@ def admin_activity_metrics(user=Depends(get_current_user)):
     }
 
 
-@router.post("/approve-review")
+# -------------------------
+# ADMIN: Start processing PDF → audio
+# -------------------------
+@router.post("/process-job",
+             tags=[ADMIN_TAG, PROCESSING_TAG, EMAIL_TAG])
+def start_admin_request_job(
+    job_id: str = Form(...),
+    start: int = Form(1),
+    end: int = Form(None),
+    user=Depends(get_current_user)
+):
+    """
+    Trigger Celery tasks to process admin job pages.
+    Allows start/end to prevent Redis/worker crash.
+    No credit deduction.
+    """
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    job = jobs_collection.find_one({"job_id": job_id})
+    if not job:
+        raise HTTPException(status_code=404, detail="User job not found")
+
+    # Block processing if review is required but not approved
+    if job.get("review_required") and job.get("review_status") != "approved":
+        raise HTTPException(
+            status_code=403,
+            detail="Job requires admin approval before processing"
+        )
+
+    total_pages = job.get("num_pages", 0)
+    end = end or total_pages
+
+    if start < 1 or end > total_pages or start > end:
+        raise HTTPException(status_code=400, detail="Invalid page range")
+
+    pages_requested = end - start + 1
+    if pages_requested > MAX_PAGES_AT_ONCE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many pages requested at once ({pages_requested}). "
+                   f"Max allowed per batch: {MAX_PAGES_AT_ONCE}"
+        )
+
+    # Trigger Celery tasks for each page
+    task_ids = []
+    for page in range(start, end + 1):
+        task = celery.send_task(
+            "tasks.process_page",
+            args=[job_id, job["remote_pdf_path"], page]
+        )
+        task_ids.append(task.id)
+
+    celery.send_task(
+        "tasks.send_job_state_email",
+        args=[job_id, "processing", "Your job has started processing."]
+    )
+
+    return {
+        "job_id": job_id,
+        "task_ids": task_ids,
+        "pages_processing": pages_requested,
+        "total_pages": total_pages
+    }
+
+@router.post("/approve-review",
+    tags=[ADMIN_TAG, REVIEW_TAG, EMAIL_TAG])
 def approve_review(
     job_id: str = Form(...),
     user=Depends(get_current_user)
 ):
-    # Admin only
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
@@ -290,6 +305,17 @@ def approve_review(
             detail="Pending review job not found"
         )
 
+    request_user = users_collection.find_one({"_id": job["user_id"]})
+    if not request_user:
+        raise HTTPException(
+            status_code=404,
+            detail="Requesting user not found"
+        )
+    
+    total_cost = PAGE_COST * job["num_pages"]
+    require_credits(request_user, total_cost)
+    deduct_credits(request_user["_id"], total_cost)
+
     jobs_collection.update_one(
         {"job_id": job_id},
         {"$set": {
@@ -299,12 +325,18 @@ def approve_review(
         }}
     )
 
+    celery.send_task(
+        "tasks.send_job_state_email",
+        args=[job_id, "approved", None]
+    )
+
     return {
         "status": "approved",
         "job_id": job_id
     }
 
-@router.post("/process-done")
+@router.post("/process-done", 
+             tags=[ADMIN_TAG, PROCESSING_TAG, EMAIL_TAG])
 def done_processing(
     job_id: str = Form(...),
     user=Depends(get_current_user)
@@ -336,11 +368,64 @@ def done_processing(
         }}
     )
 
+    celery.send_task(
+        "tasks.send_job_state_email",
+        args=[job_id, "done", "Your audio files are now ready."]
+    )
+
     return {
         "status": "done",
         "job_id": job_id
     }
 
+@router.post("/decline-review",
+             tags=[ADMIN_TAG, PROCESSING_TAG, EMAIL_TAG])
+def decline_review(
+    job_id: str = Form(...),
+    reason: str | None = Form(None),
+    user=Depends(get_current_user)
+):
+    # Admin check
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    job = jobs_collection.find_one({
+        "job_id": job_id,
+        "review_required": True,
+        "review_status": "pending"
+    })
+
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail="Pending review job not found"
+        )
+
+    update_data = {
+        "review_status": "declined",
+        "review_declined_at": datetime.utcnow(),
+        "review_declined_by": user["_id"]
+    }
+
+    # Optional admin feedback
+    if reason:
+        update_data["review_decline_reason"] = reason
+
+    jobs_collection.update_one(
+        {"job_id": job_id},
+        {"$set": update_data}
+    )
+
+    celery.send_task(
+        "tasks.send_job_state_email",
+        args=[job_id, "declined", reason]
+    )
+
+    return {
+        "status": "declined",
+        "job_id": job_id,
+        "reason": reason
+    }
 
 # -------------------------
 # ADMIN: List completed audiobooks

@@ -22,11 +22,14 @@ def initiate_payment(
     user=Depends(get_current_user)
 ):
     credits = payload.credits
-
+    credit_cost = credits * 5
     if credits <= 0:
         raise HTTPException(400, "Invalid credit amount")
 
-    amount_kobo = credits * 100  # ₦1 = 1 credit
+    if credits >= 500:
+        credit_cost = credits * 2.5
+
+    amount_kobo = credit_cost * 100
 
     res = requests.post(
         f"{PAYSTACK_BASE}/transaction/initialize",

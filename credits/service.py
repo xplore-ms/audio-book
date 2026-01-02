@@ -24,14 +24,14 @@ def require_credits(user, amount: int):
 
 def deduct_credits(user_id: str, amount: int):
     users_collection.update_one(
-        {"id": user_id},
+        {"_id": user_id},
         {"$inc": {"credits": -amount}}
     )
 
 
 def add_credits(user_id: str, amount: int):
     users_collection.update_one(
-        {"id": user_id},
+        {"_id": user_id},
         {"$inc": {"credits": amount}}
     )
 
