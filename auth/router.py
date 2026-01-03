@@ -3,7 +3,7 @@ from celery import Celery
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Form
 from fastapi.params import Depends
-from backend.core.dependencies import get_current_user, JWT_SECRET, JWT_ALGO
+from core.dependencies import get_current_user, JWT_SECRET, JWT_ALGO
 from jose import jwt
 from mongo import users_collection
 from core.security import (
