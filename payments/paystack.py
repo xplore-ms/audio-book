@@ -92,6 +92,8 @@ def verify_payment(
     if data["status"] != "success":
         raise HTTPException(400, "Payment not successful")
 
+    if user["_id"] != payment["user_id"]:
+        raise HTTPException(403, "Unauthorized verification attempt")
     # Credit user
     users_collection.update_one(
         {"_id": payment["user_id"]},

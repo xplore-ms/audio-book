@@ -155,6 +155,15 @@ def refresh_token(refresh_token: str = Form(...)):
         "token_type": "bearer"
     }
 
+
+@router.get("/me")
+def get_me(user=Depends(get_current_user)):
+    return {
+        "email": user["email"],
+        "credits": user.get("credits", 0)
+    }
+
+
 @router.post("/logout")
 def logout(user=Depends(get_current_user)):
     users_collection.update_one(

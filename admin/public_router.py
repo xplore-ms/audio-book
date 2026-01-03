@@ -36,7 +36,7 @@ def stream_public_audio(job_id: str, token: str = Query(...)):
     ordered_pages = sorted(pages.items(), key=page_sort_key)
     user_doc = users_collection.find_one({"_id": user["_id"]})
     user_credits = user_doc.get("credits", 0)
-    required = job.get("required_credits", 1)
+    required = job.get("required_credits", 0)
 
     if user_credits < required:
         raise HTTPException(
@@ -109,18 +109,18 @@ def download_public_audio(job_id: str, token: str = Query(...)):
     # ---- Credit check ----
     user_doc = users_collection.find_one({"_id": user["_id"]})
     user_credits = user_doc.get("credits", 0)
-    required = job.get("required_credits", 1)
+    required = job.get("required_credits", 0)
 
-    # if user_credits < required:
-    #     raise HTTPException(
-    #         status_code=403,
-    #         detail=f"Not enough credits. Required: {required}, you have: {user_credits}"
-    #     )
+    if user_credits < required:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Not enough credits. Required: {required}, you have: {user_credits}"
+        )
 
-    # users_collection.update_one(
-    #     {"_id": user["_id"]},
-    #     {"$inc": {"credits": -required}}
-    # )
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$inc": {"credits": -required}}
+    )
 
     # ---- Build final WAV ----
     pcm_chunks = []
