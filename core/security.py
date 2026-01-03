@@ -12,6 +12,8 @@ JWT_ALGO = "HS256"
 HASH_ITERATIONS = 120_000
 SALT_SIZE = 16
 
+ACCESS_TOKEN_MINUTES = 15
+REFRESH_TOKEN_DAYS = 30
 
 def hash_password(password: str) -> str:
     """
@@ -46,9 +48,21 @@ def verify_password(password: str, stored_hash: str) -> bool:
     return hmac.compare_digest(new_key, stored_key)
 
 
-def create_access_token(email: str, expires_days: int = 7) -> str:
+def create_access_token(email: str) -> str:
     payload = {
         "sub": email,
-        "exp": datetime.utcnow() + timedelta(days=expires_days)
+        "type": "access",
+        "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_MINUTES)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+def create_refresh_token(email: str) -> str:
+    payload = {
+        "sub": email,
+        "type": "refresh",
+        "exp": datetime.utcnow() + timedelta(days=REFRESH_TOKEN_DAYS)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+def hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()

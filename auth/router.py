@@ -2,9 +2,14 @@ import random
 from celery import Celery
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Form
+from fastapi.params import Depends
+from backend.core.dependencies import get_current_user, JWT_SECRET, JWT_ALGO
+from jose import jwt
 from mongo import users_collection
 from core.security import (
+    create_refresh_token,
     hash_password,
+    hash_refresh_token,
     verify_password,
     create_access_token
 )
@@ -30,6 +35,8 @@ def register(
         "email_verified": False,
         "email_verification_code": verification_code,
         "email_verification_expires": datetime.utcnow() + timedelta(minutes=10),
+        "refresh_token_hash": None,
+        "refresh_token_expires": None,
         "created_at": datetime.utcnow()
     })
 
@@ -77,28 +84,84 @@ def verify_email_code(
     return {"message": "Email verified successfully"}
 
 
+
 @router.post("/login")
 def login(
     email: str = Form(...),
     password: str = Form(...)
 ):
     user = users_collection.find_one({"email": email})
-    if not user:
-        raise HTTPException(401, "Invalid credentials")
-
-    if not verify_password(password, user["password_hash"]):
+    if not user or not verify_password(password, user["password_hash"]):
         raise HTTPException(401, "Invalid credentials")
 
     if not user.get("email_verified"):
-        raise HTTPException(
-            403,
-            "Please verify your email before logging in"
-        )
+        raise HTTPException(403, "Please verify your email")
 
-    token = create_access_token(email)
+    access_token = create_access_token(email)
+    refresh_token = create_refresh_token(email)
+
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {
+            "refresh_token_hash": hash_refresh_token(refresh_token),
+            "refresh_token_expires": datetime.utcnow() + timedelta(days=30)
+        }}
+    )
 
     return {
-        "access_token": token,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer",
         "credits": user["credits"]
     }
+
+@router.post("/refresh-token")
+def refresh_token(refresh_token: str = Form(...)):
+    try:
+        payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGO])
+    except Exception:
+        raise HTTPException(401, "Invalid refresh token")
+
+    if payload.get("type") != "refresh":
+        raise HTTPException(401, "Invalid token type")
+
+    email = payload["sub"]
+    user = users_collection.find_one({"email": email})
+
+    if not user:
+        raise HTTPException(401, "User not found")
+
+    if user["refresh_token_expires"] < datetime.utcnow():
+        raise HTTPException(401, "Refresh token expired")
+
+    if user["refresh_token_hash"] != hash_refresh_token(refresh_token):
+        raise HTTPException(401, "Token mismatch")
+
+    # Rotate tokens
+    new_access = create_access_token(email)
+    new_refresh = create_refresh_token(email)
+
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {
+            "refresh_token_hash": hash_refresh_token(new_refresh),
+            "refresh_token_expires": datetime.utcnow() + timedelta(days=30)
+        }}
+    )
+
+    return {
+        "access_token": new_access,
+        "refresh_token": new_refresh,
+        "token_type": "bearer"
+    }
+
+@router.post("/logout")
+def logout(user=Depends(get_current_user)):
+    users_collection.update_one(
+        {"email": user["email"]},
+        {"$unset": {
+            "refresh_token_hash": "",
+            "refresh_token_expires": ""
+        }}
+    )
+    return {"message": "Logged out successfully"}
