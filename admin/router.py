@@ -100,7 +100,7 @@ def start_job(
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -442,7 +442,7 @@ def my_library(user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Admin access required")
 
     jobs = jobs_collection.find(
-        {"user_id": user["_id"], "is_admin": True, "final_parts": {"$exists": True}},
+        {"user_id": str(user["_id"]), "is_admin": True, "final_parts": {"$exists": True}},
         {"_id": 0, "job_id": 1, "final_parts": 1, "final_size_mb": 1, "required_credits": 1}
     )
     return list(jobs)

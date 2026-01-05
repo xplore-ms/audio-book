@@ -43,7 +43,7 @@ def get_pages(job_id: str, user=Depends(get_current_user)):
     """
     Fetch per-page info (audio URL, sync URL, duration) for a job
     """
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
     if not job or "pages" not in job:
         raise HTTPException(status_code=404, detail="Pages info not found")
 
@@ -55,7 +55,7 @@ def stream_wav(job_id: str, token: str = Query(...)):
 
     job = jobs_collection.find_one({
         "job_id": job_id,
-        # "user_id": user["_id"]
+        "user_id": str(user["_id"])
     })
     if not job:
         raise HTTPException(404, "Job not found")
@@ -109,7 +109,7 @@ def download_audio(job_id: str, token: str = Query(...)):
     user = get_current_user(token)
 
     job = jobs_collection.find_one(
-        {"job_id": job_id, "user_id": user["_id"]}
+        {"job_id": job_id, "user_id": str(user["_id"])}
     )
     if not job or "pages" not in job:
         raise HTTPException(status_code=404, detail="Audio not available")
@@ -165,7 +165,7 @@ def get_sync(job_id: str, user=Depends(get_current_user)):
     Return per-page sync info for the frontend to build dynamic global sync.
     """
     job = jobs_collection.find_one({"job_id": job_id,
-                                     "user_id": user["_id"]
+                                     "user_id": str(user["_id"])
                                     })
     if not job or "pages" not in job:
         raise HTTPException(status_code=404, detail="Sync info not available")
@@ -179,7 +179,7 @@ def stream_page_audio(job_id: str, page: str, user=Depends(get_current_user)):
     """
     Stream a single page’s audio.
     """
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
