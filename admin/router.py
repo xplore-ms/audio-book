@@ -40,6 +40,8 @@ def make_folder_name(job_id: str) -> str:
 @router.post("/upload")
 async def upload_pdf(
     file: UploadFile = File(...),
+    title: str = Form(...),
+    category: str = Form(...),
     required_credits: int = Form(1),
     user=Depends(get_current_user)
 ):
@@ -54,7 +56,8 @@ async def upload_pdf(
     folder_name = make_folder_name(job_id)
     remote_path = f"{SUPABASE_ADMIN_FOLDER}/pdfs/{folder_name}/original.pdf"
 
-    # Upload PDF to Supabase
+    original_file_name = file.filename
+
     upload_bytes(remote_path, pdf_bytes, "application/pdf")
 
     # Count pages
@@ -64,14 +67,17 @@ async def upload_pdf(
     # Save metadata
     jobs_collection.insert_one({
         "job_id": job_id,
-        "user_id": user["_id"],
+        "user_id": str(user["_id"]),
         "is_admin": True,
+        "title": title,
+        "category": category,
+        "file_name": original_file_name,
         "folder_name": folder_name,
         "remote_pdf_path": remote_path,
         "num_pages": num_pages,
         "digits": digits,
         "required_credits": required_credits,  # credits required to listen
-        "sync": {},  # placeholder for per-page sync timestamps
+        "sync": {},
         "created_at": datetime.utcnow()
     })
 

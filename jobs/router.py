@@ -55,7 +55,7 @@ async def upload_pdf(
 
     jobs_collection.insert_one({
         "job_id": job_id,
-        "user_id": user["_id"],
+        "user_id": str(user["_id"]),
         "email": user["email"],
         "title": title,
         "file_name": original_file_name,

@@ -26,8 +26,14 @@ def my_audios(user=Depends(get_current_user)):
     Fetch all completed audios for the authenticated user
     """
     jobs = jobs_collection.find(
-        {"user_id": user["_id"]},
-        {"_id": 0, "job_id": 1}
+        {"user_id": str(user["_id"])},
+        {
+            "_id": 0, 
+            "job_id": 1, 
+            "title": 1, 
+            "file_name": 1,
+            "created_at": 1
+        }
     )
     return list(jobs)
 

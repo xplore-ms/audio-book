@@ -13,7 +13,9 @@ public_router = APIRouter(prefix="/public", tags=["Public Library"])
 def list_public_audios():
     jobs = jobs_collection.find(
         {"is_admin": True},
-        {"_id": 0, "job_id": 1, "required_credits": 1}
+        {"_id": 0, "job_id": 1, "required_credits": 1,"title": 1, 
+            "file_name": 1,
+            "created_at": 1}
     )
     return list(jobs)
 
