@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from datetime import datetime
 import requests
 import os
@@ -7,6 +7,9 @@ from mongo import users_collection, payments_collection
 from core.dependencies import get_current_user
 
 from pydantic import BaseModel
+BASE_PRICE_KOBO = 500  # ₦5
+DISCOUNT_PRICE_KOBO = 250  # ₦2.5
+DISCOUNT_THRESHOLD = 500
 
 class InitiatePaymentRequest(BaseModel):
     credits: int
@@ -16,20 +19,50 @@ PAYSTACK_BASE = "https://api.paystack.co"
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
+def calculate_price_kobo(credits: int) -> int:
+    if credits <= 0:
+        raise ValueError("Invalid credit amount")
+
+    price_per_credit = (
+        DISCOUNT_PRICE_KOBO if credits >= DISCOUNT_THRESHOLD else BASE_PRICE_KOBO
+    )
+    return credits * price_per_credit
+
+
+@router.get("/quote")
+def get_price_quote(
+    credits: int = Query(..., gt=0),
+    currency: str = Query("NGN")
+):
+    amount_kobo = calculate_price_kobo(credits)
+
+    if currency == "USD":
+        # simple fixed conversion (safe + predictable)
+        USD_RATE = 1600  # ₦1600 = $1 (you can update later)
+        amount_usd = round((amount_kobo / 100) / USD_RATE, 2)
+
+        return {
+            "credits": credits,
+            "currency": "USD",
+            "amount": amount_usd,
+            "display": f"${amount_usd}",
+        }
+
+    return {
+        "credits": credits,
+        "currency": "NGN",
+        "amount": amount_kobo / 100,
+        "display": f"₦{amount_kobo / 100:,}",
+    }
+
+
 @router.post("/initiate")
 def initiate_payment(
     payload: InitiatePaymentRequest,
     user=Depends(get_current_user)
 ):
     credits = payload.credits
-    credit_cost = credits * 5
-    if credits <= 0:
-        raise HTTPException(400, "Invalid credit amount")
-
-    if credits >= 500:
-        credit_cost = credits * 2.5
-
-    amount_kobo = credit_cost * 100
+    amount_kobo = calculate_price_kobo(credits)
 
     res = requests.post(
         f"{PAYSTACK_BASE}/transaction/initialize",
@@ -40,13 +73,13 @@ def initiate_payment(
         json={
             "email": user["email"],
             "amount": amount_kobo,
+            "currency": "NGN",  # IMPORTANT: always NGN
             "metadata": {
                 "credits": credits,
                 "user_id": str(user["_id"]),
             },
         },
     )
-
     if not res.ok:
         raise HTTPException(400, "Paystack initialization failed")
 
@@ -65,6 +98,7 @@ def initiate_payment(
         "authorization_url": data["authorization_url"],
         "reference": data["reference"],
     }
+
 
 @router.post("/verify/{reference}")
 def verify_payment(
