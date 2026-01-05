@@ -81,7 +81,7 @@ def start_job(
     end: int | None = None,
     user=Depends(get_current_user)
 ):
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -119,7 +119,7 @@ def request_full_review(
     job_id: str,
     user=Depends(get_current_user)
 ):
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": user["_id"]})
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -156,7 +156,7 @@ def get_status(task_id: str):
 @router.get("/me/activity")
 def my_activity(user=Depends(get_current_user)):
     jobs = jobs_collection.find(
-        {"user_id": user["_id"]},
+        {"user_id": str(user["_id"])},
         {"_id": 0, "job_id": 1, "num_pages": 1, "created_at": 1, "review_status": 1}
     )
 
