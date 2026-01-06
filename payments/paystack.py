@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from datetime import datetime
 import requests
 import os
-
+from dotenv import load_dotenv
 from mongo import users_collection, payments_collection
 from core.dependencies import get_current_user
 
@@ -14,6 +14,7 @@ DISCOUNT_THRESHOLD = 500
 class InitiatePaymentRequest(BaseModel):
     credits: int
 
+load_dotenv()
 PAYSTACK_SECRET = os.getenv("PAYSTACK_SECRET")
 PAYSTACK_BASE = "https://api.paystack.co"
 
