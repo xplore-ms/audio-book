@@ -31,7 +31,7 @@ def register(
     users_collection.insert_one({
         "email": email,
         "password_hash": hash_password(password),
-        "credits": 10,
+        "credits": 50,
         "email_verified": False,
         "email_verification_code": verification_code,
         "email_verification_expires": datetime.utcnow() + timedelta(minutes=10),
