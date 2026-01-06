@@ -11,10 +11,28 @@ SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "reading_app")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def upload_bytes(path: str, data: bytes, content_type="application/octet-stream") -> str:
-    # Supabase storage.upload accepts path, fileobj or bytes depending on version
-    supabase.storage.from_(SUPABASE_BUCKET).upload(path, data, {"content-type": content_type})
-    return get_url(path)
+def create_signed_url(path: str, expires_in: int = 300) -> str:
+    """
+    Create a signed URL for a private Supabase object.
+    """
+    res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(
+        path,
+        expires_in
+    )
+
+    if isinstance(res, dict):
+        return res.get("signedURL") or res.get("signed_url")
+
+    raise RuntimeError("Failed to create signed URL")
+
+def upload_bytes(path: str, data: bytes, content_type="application/octet-stream"):
+    supabase.storage.from_(SUPABASE_BUCKET).upload(
+        path,
+        data,
+        {"content-type": content_type}
+    )
+    return path  # RETURN PATH, NOT URL
+
 
 def upload_file(local_path: str, remote_path: str, content_type="application/octet-stream") -> str:
     with open(local_path, "rb") as f:
@@ -32,12 +50,54 @@ def download_to_bytes(remote_path: str) -> bytes:
         return res.read()
     raise RuntimeError("Unsupported supabase download response type")
 
-def get_url(remote_path: str) -> str:
-    resp = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(remote_path)
-    if isinstance(resp, dict):
-        # support different keys
-        return resp.get("publicUrl") or resp.get("public_url") or resp.get("publicURL")
-    return str(resp)
+# def get_url(remote_path: str) -> str:
+#     resp = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(remote_path)
+#     if isinstance(resp, dict):
+#         # support different keys
+#         return resp.get("publicUrl") or resp.get("public_url") or resp.get("publicURL")
+#     return str(resp)
+
+def build_playlist_response(job: dict, signed_url_ttl: int = 300):
+    pages = job["pages"]
+
+    def page_sort_key(k):
+        return int(k.split("_")[-1])
+
+    ordered_keys = sorted(pages.keys(), key=page_sort_key)
+
+    playlist = []
+    for key in ordered_keys:
+        page = pages[key]
+
+        audio_path = page.get("audio_path")
+        sync_path = page.get("sync_path")
+
+        if not audio_path:
+            continue
+
+        audio_url = supabase.storage \
+            .from_(SUPABASE_BUCKET) \
+            .create_signed_url(audio_path, signed_url_ttl)["signedURL"]
+
+        sync_url = None
+        if sync_path:
+            sync_url = supabase.storage \
+                .from_(SUPABASE_BUCKET) \
+                .create_signed_url(sync_path, signed_url_ttl)["signedURL"]
+
+        playlist.append({
+            "page": key,
+            "audio_url": audio_url,
+            "sync_url": sync_url,
+            "duration": page.get("duration", 0)
+        })
+
+    return {
+        "job_id": job["job_id"],
+        "title": job.get("title"),
+        "pages": playlist
+    }
+
 
 def list_files(folder: str):
     """

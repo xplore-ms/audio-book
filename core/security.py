@@ -12,7 +12,7 @@ JWT_ALGO = "HS256"
 HASH_ITERATIONS = 120_000
 SALT_SIZE = 16
 
-ACCESS_TOKEN_MINUTES = 15
+ACCESS_TOKEN_HOURS = 24
 REFRESH_TOKEN_DAYS = 30
 
 def hash_password(password: str) -> str:
@@ -52,7 +52,7 @@ def create_access_token(email: str) -> str:
     payload = {
         "sub": email,
         "type": "access",
-        "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_MINUTES)
+        "exp": datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_HOURS)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
 

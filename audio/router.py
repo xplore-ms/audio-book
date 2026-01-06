@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse, JSONResponse
-from supabase_client import download_to_bytes, extract_storage_path
+from supabase_client import build_playlist_response, create_signed_url, download_to_bytes, extract_storage_path
 from credits.service import  (
     require_credits,
     deduct_credits,
@@ -38,16 +38,16 @@ def my_audios(user=Depends(get_current_user)):
     return list(jobs)
 
 
-@router.get("/pages/{job_id}")
-def get_pages(job_id: str, user=Depends(get_current_user)):
-    """
-    Fetch per-page info (audio URL, sync URL, duration) for a job
-    """
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
-    if not job or "pages" not in job:
-        raise HTTPException(status_code=404, detail="Pages info not found")
+# @router.get("/pages/{job_id}")
+# def get_pages(job_id: str, user=Depends(get_current_user)):
+#     """
+#     Fetch per-page info (audio URL, sync URL, duration) for a job
+#     """
+#     job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
+#     if not job or "pages" not in job:
+#         raise HTTPException(status_code=404, detail="Pages info not found")
 
-    return {"pages": job["pages"]}
+#     return {"pages": job["pages"]}
 
 @router.get("/stream/{job_id}")
 def stream_wav(job_id: str, token: str = Query(...)):
@@ -172,6 +172,18 @@ def get_sync(job_id: str, user=Depends(get_current_user)):
 
     return JSONResponse({"pages": job["pages"]})
 
+
+@router.get("/pages/{job_id}")
+def get_pages(job_id: str, user=Depends(get_current_user)):
+    job = jobs_collection.find_one({
+        "job_id": job_id,
+        "user_id": str(user["_id"])
+    })
+
+    if not job or "pages" not in job:
+        raise HTTPException(404, "Pages not found")
+
+    return build_playlist_response(job)
 
 
 @router.get("/stream/page/{job_id}/{page}")
