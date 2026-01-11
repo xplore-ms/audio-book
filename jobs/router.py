@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
 
 from core.dependencies import get_current_user
@@ -15,7 +15,10 @@ from celery import Celery
 from core.config import MAX_UPLOAD_SIZE, MAX_PAGES
 import os
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
+class UpdateJobRequest(BaseModel):
+    title: str
 # -----------------------------
 # Utilities for TTS sync
 # -----------------------------
@@ -36,7 +39,6 @@ async def upload_pdf(
     file: UploadFile = File(...),
     user=Depends(get_current_user)
 ):
-
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF allowed")
 
@@ -45,7 +47,10 @@ async def upload_pdf(
         raise HTTPException(400, "File too large")
 
     job_id = str(uuid.uuid4())
-    folder = f"{datetime.utcnow().strftime('%Y%m%d')}_{job_id}"
+    created_at = datetime.utcnow()
+    expires_at = created_at + timedelta(days=5)
+
+    folder = f"{created_at.strftime('%Y%m%d')}_{job_id}"
     remote_pdf = f"pdfs/{folder}/original.pdf"
 
     original_file_name = file.filename
@@ -63,16 +68,109 @@ async def upload_pdf(
         "folder_name": folder,
         "num_pages": pages,
         "digits": len(str(pages)),
-        "created_at": datetime.utcnow()
+        "created_at": created_at,
+        "expires_at": expires_at,      # 🔥 DELETE DATE
+        "status": "uploaded"
     })
-
 
     return {
         "job_id": job_id,
         "pages": pages,
         "title": title,
-        "file_name": original_file_name
+        "file_name": original_file_name,
+        "expires_at": expires_at
     }
+
+@router.get("/job/{job_id}")
+async def get_job(
+    job_id: str,
+    user=Depends(get_current_user)
+):
+    job = jobs_collection.find_one({
+        "job_id": job_id,
+        "user_id": str(user["_id"])
+    })
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    return {
+        "job_id": job["job_id"],
+        "pages": job["num_pages"],
+        "title": job["title"],
+        "file_name": job["file_name"],
+        "created_at": job["created_at"],
+    }
+
+@router.post("/job/{job_id}/reupload")
+async def reupload_pdf(
+    job_id: str,
+    file: UploadFile = File(...),
+    user=Depends(get_current_user)
+):
+    # 1. Validate file
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF allowed")
+
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) > MAX_UPLOAD_SIZE:
+        raise HTTPException(400, "File too large")
+
+    # 2. Find job (ownership check)
+    job = jobs_collection.find_one({
+        "job_id": job_id,
+        "user_id": str(user["_id"])
+    })
+
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    # 3. Upload to SAME folder & SAME path
+    remote_pdf = job["remote_pdf_path"]  # reuse existing path
+    upload_bytes(remote_pdf, pdf_bytes, "application/pdf")
+
+    # 4. Recalculate pages
+    pages = get_num_pages_from_bytes(pdf_bytes)
+
+    if pages > MAX_PAGES:
+        raise HTTPException(400, "Page limit exceeded")
+
+    # 5. Update job metadata
+    jobs_collection.update_one(
+        {"job_id": job_id},
+        {"$set": {
+            "file_name": file.filename,
+            "num_pages": pages,
+            "digits": len(str(pages)),
+            "updated_at": datetime.utcnow(),
+            "reuploaded": True,
+            "status": "uploaded"  # optional reset
+        }}
+    )
+
+    return {
+        "job_id": job_id,
+        "pages": pages,
+        "file_name": file.filename,
+        "message": "PDF re-uploaded successfully"
+    }
+
+
+@router.patch("/job/{job_id}")
+async def update_job(
+    job_id: str,
+    payload: UpdateJobRequest,
+    user=Depends(get_current_user)
+):
+    result = jobs_collection.update_one(
+        {"job_id": job_id, "user_id": str(user["_id"])},
+        {"$set": {"title": payload.title}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(404, "Job not found")
+
+    return {"message": "Job updated successfully"}
 
 @router.post("/start")
 def start_job(
