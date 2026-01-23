@@ -177,14 +177,37 @@ def get_sync(job_id: str, user=Depends(get_current_user)):
 def get_pages(job_id: str, user=Depends(get_current_user)):
     job = jobs_collection.find_one({
         "job_id": job_id,
-        "user_id": str(user["_id"])
+        # "user_id": str(user["_id"])
     })
 
     if not job or "pages" not in job:
         raise HTTPException(404, "Pages not found")
 
+    if job.get("shared") is not True and job["user_id"] != str(user["_id"]):
+        raise HTTPException(403, "Access denied")
     return build_playlist_response(job)
 
+@router.post("/share/{job_id}")
+def share_audiobook(job_id: str, user=Depends(get_current_user)):
+    result = jobs_collection.update_one(
+        {"job_id": job_id, "user_id": str(user["_id"])},
+        {"$set": {"shared": True}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(404, "Job not found")
+
+    return {"message": "Job updated successfully"}
+
+@router.get("/unshare/{job_id}")
+def unshare_audiobook(job_id: str, user=Depends(get_current_user)):
+    result = jobs_collection.update_one(
+        {"job_id": job_id, "user_id": str(user["_id"])},
+        {"$set": {"shared": False}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(404, "Job not found")
+
+    return {"message": "Job updated successfully"}
 
 @router.get("/stream/page/{job_id}/{page}")
 def stream_page_audio(job_id: str, page: str, user=Depends(get_current_user)):
