@@ -1,5 +1,6 @@
 # supabase_client.py
 import os
+from time import time
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -71,7 +72,7 @@ def build_playlist_response(job: dict, signed_url_ttl: int = 300):
 
         audio_path = page.get("audio_path")
         sync_path = page.get("sync_path")
-
+    
         if not audio_path:
             continue
 
@@ -89,7 +90,8 @@ def build_playlist_response(job: dict, signed_url_ttl: int = 300):
             "page": key,
             "audio_url": audio_url,
             "sync_url": sync_url,
-            "duration": page.get("duration", 0)
+            "duration": page.get("duration", 0),
+            "expires_at": int(time.time()) + signed_url_ttl
         })
 
     return {
