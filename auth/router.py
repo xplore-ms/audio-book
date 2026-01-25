@@ -174,3 +174,59 @@ def logout(user=Depends(get_current_user)):
         }}
     )
     return {"message": "Logged out successfully"}
+
+
+@router.post("/forgot-password")
+def forgot_password(email: str = Form(...)):
+    user = users_collection.find_one({"email": email})
+
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    reset_code = f"{random.randint(10000, 99999)}"
+
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {
+            "password_reset_code": reset_code,
+            "password_reset_expires": datetime.utcnow() + timedelta(minutes=10)
+        }}
+    )
+
+    celery.send_task(
+        "tasks.send_reset_code_email",
+        args=[email, reset_code]
+    )
+
+    return {"message": "Password reset code sent to your email"}
+
+
+@router.post("/reset-password")
+def reset_password(
+    email: str = Form(...),
+    code: str = Form(...),
+    new_password: str = Form(...)
+):
+    user = users_collection.find_one({"email": email})
+
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    if user.get("password_reset_code") != code:
+        raise HTTPException(400, "Invalid reset code")
+
+    if user.get("password_reset_expires") < datetime.utcnow():
+        raise HTTPException(400, "Reset code expired")
+
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {
+            "password_hash": hash_password(new_password)
+        },
+         "$unset": {
+            "password_reset_code": "",
+            "password_reset_expires": ""
+         }}
+    )
+
+    return {"message": "Password reset successfully"}
