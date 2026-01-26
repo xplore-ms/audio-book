@@ -1,6 +1,6 @@
 # supabase_client.py
 import os
-from time import time
+import time
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -137,3 +137,40 @@ def extract_storage_path(public_url: str) -> str:
     if marker not in public_url:
         raise ValueError("Invalid Supabase public URL")
     return public_url.split(marker, 1)[1]
+
+def delete_file(path: str) -> bool:
+    """
+    Delete a single file from Supabase storage.
+    Returns True if deleted successfully, False otherwise.
+    """
+    try:
+        # Supabase expects a list of paths
+        res = supabase.storage.from_(SUPABASE_BUCKET).remove([path])
+        # `res` is usually a list of removed file info; empty list means success
+        return True
+    except Exception as e:
+        print(f"[Supabase] Failed to delete {path}: {e}")
+        return False
+
+
+def delete_folder(folder: str) -> dict:
+    """
+    Delete all files in a folder from Supabase storage.
+    Returns a dict with {deleted: [...], failed: [...]}.
+    """
+    if not folder.endswith("/"):
+        folder = folder + "/"
+
+    deleted = []
+    failed = []
+
+    files = list_files(folder)
+    for file in files:
+        # Each file item has a 'name' field with the full path relative to bucket
+        file_path = file.get("name") or file.get("path") or file
+        if delete_file(file_path):
+            deleted.append(file_path)
+        else:
+            failed.append(file_path)
+
+    return {"deleted": deleted, "failed": failed}
