@@ -1,18 +1,20 @@
 import uuid
 from datetime import datetime, timedelta
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
+from fastapi import APIRouter, Query, Request, UploadFile, File, HTTPException, Depends, Form
 
+from core.rate_limiter import rate_limit
 from core.dependencies import get_current_user
 from credits.service import  (
-    require_credits,
-    deduct_credits,
+    UPLOAD_COST,
+    add_credits,
+    deduct_credits_atomic,
     PAGE_COST
 )
-from supabase_client import upload_bytes
+from supabase_client import delete_file, upload_bytes
 from pdf_utils import get_num_pages_from_bytes
 from mongo import jobs_collection
 from celery import Celery
-from core.config import MAX_UPLOAD_SIZE, MAX_PAGES
+from core.config import MAX_PAGES_PER_JOB, MAX_UPLOAD_SIZE, MAX_PAGES
 import os
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -35,14 +37,27 @@ celery.config_from_object("celeryconfig")
 
 @router.post("/upload")
 async def upload_pdf(
+    request: Request,
     title: str = Form(...),
     file: UploadFile = File(...),
     user=Depends(get_current_user)
 ):
+    rate_limit(
+        key=f"upload:{user['_id']}:{request.client.host}",
+        limit=3,
+        window_seconds=60
+    )
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF allowed")
 
+    if file.content_type != "application/pdf":
+        raise HTTPException(400, "Only PDF allowed")
+
     pdf_bytes = await file.read()
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise HTTPException(400, "Invalid PDF file")
+
     if len(pdf_bytes) > MAX_UPLOAD_SIZE:
         raise HTTPException(400, "File too large")
 
@@ -55,23 +70,34 @@ async def upload_pdf(
 
     original_file_name = file.filename
 
-    upload_bytes(remote_pdf, pdf_bytes, "application/pdf")
+    
     pages = get_num_pages_from_bytes(pdf_bytes)
+    if pages > MAX_PAGES:
+        raise HTTPException(400, "Page limit exceeded")
 
-    jobs_collection.insert_one({
-        "job_id": job_id,
-        "user_id": str(user["_id"]),
-        "email": user["email"],
-        "title": title,
-        "file_name": original_file_name,
-        "remote_pdf_path": remote_pdf,
-        "folder_name": folder,
-        "num_pages": pages,
-        "digits": len(str(pages)),
-        "created_at": created_at,
-        "expires_at": expires_at,      # 🔥 DELETE DATE
-        "status": "uploaded"
-    })
+    deduct_credits_atomic(user["_id"], UPLOAD_COST)
+
+    try:
+        upload_bytes(remote_pdf, pdf_bytes, "application/pdf")
+        jobs_collection.insert_one({
+            "job_id": job_id,
+            "user_id": str(user["_id"]),
+            "email": user["email"],
+            "title": title,
+            "file_name": original_file_name,
+            "remote_pdf_path": remote_pdf,
+            "folder_name": folder,
+            "num_pages": pages,
+            "digits": len(str(pages)),
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "status": "uploaded"
+        })
+    except Exception:
+        add_credits(user["_id"], UPLOAD_COST)
+        raise
+
+
 
     return {
         "job_id": job_id,
@@ -104,15 +130,29 @@ async def get_job(
 
 @router.post("/job/{job_id}/reupload")
 async def reupload_pdf(
+    request: Request,
     job_id: str,
     file: UploadFile = File(...),
     user=Depends(get_current_user)
 ):
+    rate_limit(
+        key=f"upload:{user['_id']}:{request.client.host}",
+        limit=2,
+        window_seconds=60
+    )
+
     # 1. Validate file
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF allowed")
 
+    if file.content_type != "application/pdf":
+        raise HTTPException(400, "Only PDF allowed")
+
     pdf_bytes = await file.read()
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise HTTPException(400, "Invalid PDF file")
+
     if len(pdf_bytes) > MAX_UPLOAD_SIZE:
         raise HTTPException(400, "File too large")
 
@@ -126,27 +166,34 @@ async def reupload_pdf(
         raise HTTPException(404, "Job not found")
 
     # 3. Upload to SAME folder & SAME path
-    remote_pdf = job["remote_pdf_path"]  # reuse existing path
-    upload_bytes(remote_pdf, pdf_bytes, "application/pdf")
-
-    # 4. Recalculate pages
     pages = get_num_pages_from_bytes(pdf_bytes)
 
     if pages > MAX_PAGES:
         raise HTTPException(400, "Page limit exceeded")
+    
+    remote_pdf = job["remote_pdf_path"]
+    deduct_credits_atomic(user["_id"], UPLOAD_COST)
+
+    try:
+        upload_bytes(remote_pdf, pdf_bytes, "application/pdf")
+        jobs_collection.update_one(
+            {"job_id": job_id},
+            {"$set": {
+                "file_name": file.filename,
+                "num_pages": pages,
+                "digits": len(str(pages)),
+                "updated_at": datetime.utcnow(),
+                "reuploaded": True,
+                "status": "uploaded"
+            }}
+        )
+    except Exception:
+        add_credits(user["_id"], UPLOAD_COST)
+        raise
+
+
 
     # 5. Update job metadata
-    jobs_collection.update_one(
-        {"job_id": job_id},
-        {"$set": {
-            "file_name": file.filename,
-            "num_pages": pages,
-            "digits": len(str(pages)),
-            "updated_at": datetime.utcnow(),
-            "reuploaded": True,
-            "status": "uploaded"  # optional reset
-        }}
-    )
 
     return {
         "job_id": job_id,
@@ -179,31 +226,61 @@ def start_job(
     end: int | None = None,
     user=Depends(get_current_user)
 ):
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
+    rate_limit(
+        key=f"start:{user['_id']}",
+        limit=5,
+        window_seconds=3600
+    )
+    job = jobs_collection.find_one_and_update(
+        {
+            "job_id": job_id,
+            "user_id": str(user["_id"]),
+            "status": "uploaded"
+        },
+        {
+            "$set": {
+                "status": "processing",
+                "started_at": datetime.utcnow()
+            }
+        }
+    )
+
     if not job:
-        raise HTTPException(404, "Job not found")
+        raise HTTPException(400, "Job already started")
+
 
     total = job["num_pages"]
     end = end or total
     pages = end - start + 1
     total_cost = PAGE_COST * pages
+    if start < 1 or end > total or start > end:
+        raise HTTPException(400, "Invalid page range")
 
-    if pages > MAX_PAGES:
+    if pages > MAX_PAGES_PER_JOB:
         raise HTTPException(400, "Page limit exceeded")
 
-    require_credits(user, total_cost)
-    deduct_credits(user["_id"], total_cost)
+    deduct_credits_atomic(user["_id"], total_cost)
+    
 
     task_ids = []
-    for page in range(start, end + 1):
-        res =celery.send_task(
-            "tasks.process_page",
-            args=[job_id, job["remote_pdf_path"], page]
+    try:
+        for page in range(start, end + 1):
+            res =celery.send_task(
+                "tasks.process_page",
+                args=[job_id, job["remote_pdf_path"], page]
+            )
+            task_ids.append(res.id)
+        jobs_collection.update_one(
+            {"job_id": job_id, "status": "uploaded"},
+            {"$set": {
+                "status": "processing",
+                "started_at": datetime.utcnow(),
+                "task_ids": task_ids
+            }}
         )
-        task_ids.append(res.id)
-
-    # 🔥 AUTO MERGE
-    # celery.send_task("tasks.merge_pages", args=[job_id])
+    except Exception:
+        add_credits(user["_id"], total_cost)
+        raise
 
     return {
         "status": "processing", 
@@ -246,10 +323,24 @@ def request_full_review(
 
 
 @router.get("/status/{task_id}")
-def get_status(task_id: str):
-    async_result = celery.AsyncResult(task_id)
-    return {"state": async_result.state, "result": async_result.result}
+def get_status(
+    task_id: str,
+    user=Depends(get_current_user)
+):
+    job = jobs_collection.find_one({
+        "task_ids": task_id,
+        "user_id": str(user["_id"])
+    })
 
+    if not job:
+        raise HTTPException(403, "Not authorized")
+
+    async_result = celery.AsyncResult(task_id)
+
+    return {
+        "state": async_result.state, 
+        "result": async_result.result
+    }
 
 @router.get("/me/activity")
 def my_activity(user=Depends(get_current_user)):
@@ -262,4 +353,39 @@ def my_activity(user=Depends(get_current_user)):
         "email": user["email"],
         "credits": user["credits"],
         "jobs": list(jobs)
+    }
+
+CLEANUP_SECRET_KEY="my_cron_secret"
+@router.post("/cleanup-expired-files")
+def cleanup_expired_files(key: str = Query(..., description="Secret key to authorize cleanup")):
+    """
+    Delete expired PDF files from Supabase.
+    Only expires_at < now. Does NOT delete MongoDB records.
+    Use secret key to call from external cron.
+    """
+    if key != CLEANUP_SECRET_KEY:
+        raise HTTPException(403, "Not authorized")
+
+    now = datetime.utcnow()
+    expired_jobs = jobs_collection.find({"expires_at": {"$lt": now}})
+    
+    deleted_count = 0
+    errors = []
+
+    for job in expired_jobs:
+        remote_path = job.get("remote_pdf_path")
+        if not remote_path:
+            continue
+        
+        try:
+            delete_file(remote_path)
+            deleted_count += 1
+        except Exception as e:
+            errors.append({"job_id": job.get("job_id"), "error": str(e)})
+            continue
+
+    return {
+        "status": "done",
+        "deleted_files": deleted_count,
+        "errors": errors
     }

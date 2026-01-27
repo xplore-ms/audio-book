@@ -4,6 +4,7 @@ import time
 from dotenv import load_dotenv
 load_dotenv()
 
+import httpx
 from supabase import create_client, Client
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -58,44 +59,67 @@ def download_to_bytes(remote_path: str) -> bytes:
 #         return resp.get("publicUrl") or resp.get("public_url") or resp.get("publicURL")
 #     return str(resp)
 
-def build_playlist_response(job: dict, signed_url_ttl: int = 300):
-    pages = job["pages"]
+import time
+from typing import Optional
 
-    def page_sort_key(k):
+def _safe_create_signed_url(path: str, ttl: int) -> Optional[str]:
+    """
+    Create a signed URL safely with minimal retry.
+    Returns None if it fails.
+    """
+    try:
+        res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(path, ttl)
+        return res.get("signedURL") or res.get("signed_url")
+    except Exception:
+        # One lightweight retry (new TLS connection)
+        try:
+            res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(path, ttl)
+            return res.get("signedURL") or res.get("signed_url")
+        except Exception as e:
+            print(f"[SignedURL] Failed for {path}: {e}")
+            return None
+
+
+def build_playlist_response(job: dict, signed_url_ttl: int = 300):
+    pages = job.get("pages", {})
+
+    def page_sort_key(k: str) -> int:
         return int(k.split("_")[-1])
 
     ordered_keys = sorted(pages.keys(), key=page_sort_key)
 
+    now = int(time.time())
+    expires_at = now + signed_url_ttl
+
     playlist = []
+
     for key in ordered_keys:
         page = pages[key]
 
         audio_path = page.get("audio_path")
-        sync_path = page.get("sync_path")
-    
         if not audio_path:
             continue
 
-        audio_url = supabase.storage \
-            .from_(SUPABASE_BUCKET) \
-            .create_signed_url(audio_path, signed_url_ttl)["signedURL"]
+        audio_url = _safe_create_signed_url(audio_path, signed_url_ttl)
+        if not audio_url:
+            # Skip page if audio URL fails
+            continue
 
         sync_url = None
+        sync_path = page.get("sync_path")
         if sync_path:
-            sync_url = supabase.storage \
-                .from_(SUPABASE_BUCKET) \
-                .create_signed_url(sync_path, signed_url_ttl)["signedURL"]
+            sync_url = _safe_create_signed_url(sync_path, signed_url_ttl)
 
         playlist.append({
             "page": key,
             "audio_url": audio_url,
             "sync_url": sync_url,
             "duration": page.get("duration", 0),
-            "expires_at": int(time.time()) + signed_url_ttl
+            "expires_at": expires_at
         })
 
     return {
-        "job_id": job["job_id"],
+        "job_id": job.get("job_id"),
         "title": job.get("title"),
         "pages": playlist
     }

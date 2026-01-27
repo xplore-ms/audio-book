@@ -1,9 +1,10 @@
+import time
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse, JSONResponse
-from supabase_client import build_playlist_response, create_signed_url, download_to_bytes, extract_storage_path
+from supabase_client import _safe_create_signed_url, download_to_bytes, extract_storage_path
 from credits.service import  (
     require_credits,
-    deduct_credits,
+    deduct_credits_atomic,
     DOWNLOAD_COST
 )
 from mongo import jobs_collection
@@ -117,7 +118,7 @@ def download_audio(job_id: str, token: str = Query(...)):
     pages = job["pages"]
 
     require_credits(user, DOWNLOAD_COST)
-    deduct_credits(user["_id"], DOWNLOAD_COST)
+    deduct_credits_atomic(user["_id"], DOWNLOAD_COST)
 
     def page_sort_key(item):
         return int(item[0].split("_")[-1])
@@ -174,18 +175,52 @@ def get_sync(job_id: str, user=Depends(get_current_user)):
 
 
 @router.get("/pages/{job_id}")
-def get_pages(job_id: str, user=Depends(get_current_user)):
-    job = jobs_collection.find_one({
-        "job_id": job_id,
-        # "user_id": str(user["_id"])
-    })
-
+def get_pages(job_id: str, skip: int = 0, limit: int = 5, user=Depends(get_current_user)):
+    job = jobs_collection.find_one({"job_id": job_id})
     if not job or "pages" not in job:
         raise HTTPException(404, "Pages not found")
 
     if job.get("shared") is not True and job["user_id"] != str(user["_id"]):
         raise HTTPException(403, "Access denied")
-    return build_playlist_response(job)
+
+    pages = job.get("pages", {})
+    
+    # Sort keys
+    ordered_keys = sorted(pages.keys(), key=lambda k: int(k.split("_")[-1]))
+
+    # Paginate
+    paged_keys = ordered_keys[skip : skip + limit]
+
+    playlist = []
+    now = int(time.time())
+    expires_at = now + 300  # 5 minutes TTL for signed URLs
+
+    for key in paged_keys:
+        page = pages[key]
+        audio_path = page.get("audio_path")
+        if not audio_path:
+            continue
+
+        audio_url = _safe_create_signed_url(audio_path, 300)
+        sync_url = _safe_create_signed_url(page["sync_path"], 300) if page.get("sync_path") else None
+
+        playlist.append({
+            "page": key,
+            "audio_url": audio_url,
+            "sync_url": sync_url,
+            "duration": page.get("duration", 0),
+            "expires_at": expires_at
+        })
+
+    return {
+        "job_id": job.get("job_id"),
+        "title": job.get("title"),
+        "pages": playlist,
+        "total_pages": len(ordered_keys),
+        "skip": skip,
+        "limit": limit
+    }
+
 
 @router.post("/share/{job_id}")
 def share_audiobook(job_id: str, user=Depends(get_current_user)):

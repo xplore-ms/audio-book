@@ -8,7 +8,7 @@ from core.security import (
 )
 from credits.service import  (
     require_credits,
-    deduct_credits,
+    deduct_credits_atomic,
     PAGE_COST
 )
 from pdf_utils import get_num_pages_from_bytes
@@ -320,7 +320,7 @@ def approve_review(
     
     total_cost = PAGE_COST * job["num_pages"]
     require_credits(request_user, total_cost)
-    deduct_credits(request_user["_id"], total_cost)
+    deduct_credits_atomic(request_user["_id"], total_cost)
 
     jobs_collection.update_one(
         {"job_id": job_id},

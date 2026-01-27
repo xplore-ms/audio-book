@@ -22,12 +22,14 @@ def require_credits(user, amount: int):
     if user["credits"] < amount:
         raise HTTPException(403, "Insufficient credits")
 
-
-def deduct_credits(user_id: str, amount: int):
-    users_collection.update_one(
-        {"_id": user_id},
+def deduct_credits_atomic(user_id, amount):
+    result = users_collection.update_one(
+        {"_id": user_id, "credits": {"$gte": amount}},
         {"$inc": {"credits": -amount}}
     )
+
+    if result.modified_count == 0:
+        raise HTTPException(403, "Insufficient credits")
 
 
 def add_credits(user_id: str, amount: int):
