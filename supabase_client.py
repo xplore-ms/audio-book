@@ -31,7 +31,7 @@ def upload_bytes(path: str, data: bytes, content_type="application/octet-stream"
     supabase.storage.from_(SUPABASE_BUCKET).upload(
         path,
         data,
-        {"content-type": content_type}
+        {"content-type": content_type, "upsert": "true"}
     )
     return path  # RETURN PATH, NOT URL
 
