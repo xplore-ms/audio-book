@@ -1,4 +1,5 @@
 import uuid
+
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Query, Request, UploadFile, File, HTTPException, Depends, Form
 
@@ -12,7 +13,7 @@ from credits.service import  (
 )
 from supabase_client import delete_file, upload_bytes
 from pdf_utils import get_num_pages_from_bytes
-from mongo import jobs_collection
+from mongo import jobs_collection, job_tasks
 from celery import Celery
 from core.config import MAX_PAGES_PER_JOB, MAX_UPLOAD_SIZE, MAX_PAGES
 import os
@@ -93,6 +94,7 @@ async def upload_pdf(
             "expires_at": expires_at,
             "status": "uploaded"
         })
+
     except Exception:
         add_credits(user["_id"], UPLOAD_COST)
         raise
@@ -120,9 +122,21 @@ async def get_job(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    processing_id = job.get("processing_id")
+
+    if not processing_id:
+        return {
+            "job_id": job["job_id"],
+            "pages": job["num_pages"],
+            "status": "done",
+            "title": job["title"],
+            "file_name": job["file_name"],
+            "created_at": job["created_at"]
+        }
     return {
         "job_id": job["job_id"],
         "pages": job["num_pages"],
+        "status": job["status"],
         "title": job["title"],
         "file_name": job["file_name"],
         "created_at": job["created_at"],
@@ -231,63 +245,70 @@ def start_job(
         limit=5,
         window_seconds=3600
     )
-    job = jobs_collection.find_one_and_update(
-        {
-            "job_id": job_id,
-            "user_id": str(user["_id"]),
-            "status": "uploaded"
-        },
-        {
-            "$set": {
-                "status": "processing",
-                "started_at": datetime.utcnow()
-            }
-        }
-    )
+
+    job = jobs_collection.find_one({
+        "job_id": job_id,
+        "user_id": str(user["_id"])
+    })
 
     if not job:
-        raise HTTPException(400, "Job already started")
+        raise HTTPException(404, "Document processing not found")
 
-
+    # if job["status"] == "processing":
+    #     raise HTTPException(400, "You have a processing document in the background. Please wait for it to finish... Please wait for it to finish.")
+    
     total = job["num_pages"]
     end = end or total
-    pages = end - start + 1
-    total_cost = PAGE_COST * pages
+
     if start < 1 or end > total or start > end:
         raise HTTPException(400, "Invalid page range")
 
+    pages = end - start + 1
     if pages > MAX_PAGES_PER_JOB:
         raise HTTPException(400, "Page limit exceeded")
 
+    total_cost = PAGE_COST * pages
     deduct_credits_atomic(user["_id"], total_cost)
-    
+    processing_id = str(uuid.uuid4())
+    # Mark job as processing (job-level only)
+    jobs_collection.update_one(
+        {"job_id": job_id},
+        {"$set": {"status": "processing", "processing_id": processing_id, "started_at": datetime.utcnow()}}
+    )
 
-    task_ids = []
     try:
         for page in range(start, end + 1):
-            res =celery.send_task(
+            res = celery.send_task(
                 "tasks.process_page",
-                args=[job_id, job["remote_pdf_path"], page]
+                args=[
+                    job_id,
+                    processing_id,
+                    job["remote_pdf_path"],
+                    page
+                ]
             )
-            task_ids.append(res.id)
-        jobs_collection.update_one(
-            {"job_id": job_id, "status": "uploaded"},
-            {"$set": {
-                "status": "processing",
-                "started_at": datetime.utcnow(),
-                "task_ids": task_ids
-            }}
-        )
+
+            job_tasks.insert_one({
+                "job_id": job_id,
+                "page": page,
+                "processing_id": processing_id,
+                "state": "PENDING",
+                "progress": 0,
+                "celery_task_id": res.id,
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            })
+            
     except Exception:
         add_credits(user["_id"], total_cost)
         raise
 
     return {
-        "status": "processing", 
+        "status": "processing",
         "pages": pages,
-        "job_id": job_id,
-        "task_ids": task_ids,
+        "job_id": job_id
     }
+
 
 @router.post("/request-full-review")
 def request_full_review(
@@ -321,6 +342,40 @@ def request_full_review(
         "job_id": job_id
     }
 
+@router.get("/job/{job_id}/progress")
+def get_job_progress(job_id: str, user=Depends(get_current_user)):
+    job = jobs_collection.find_one({
+        "job_id": job_id,
+        "user_id": str(user["_id"])
+    })
+
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    processing_id = job.get("processing_id")
+
+    if not processing_id:
+        return {"status": "not_found", "progress": 0}
+
+    tasks = list(job_tasks.find(
+        {
+            "job_id": job_id,
+            "processing_id": processing_id 
+        },
+        {"_id": 0, "page": 1, "state": 1, "progress": 1}
+    ))
+
+    if not tasks:
+        return {"status": "processing", "progress": 0}
+
+    avg_progress = sum(t["progress"] for t in tasks) / len(tasks)
+
+    return {
+        "status": job["status"],
+        "processing_id": processing_id,
+        "progress": round(avg_progress),
+        "tasks": tasks
+    }
 
 @router.get("/status/{task_id}")
 def get_status(
@@ -332,11 +387,13 @@ def get_status(
         "user_id": str(user["_id"])
     })
 
+    print(job)
     if not job:
         raise HTTPException(403, "Not authorized")
 
     async_result = celery.AsyncResult(task_id)
-
+    print(async_result.state, 
+         async_result.result)
     return {
         "state": async_result.state, 
         "result": async_result.result
