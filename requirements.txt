@@ -29,4 +29,5 @@ google-genai
 supabase
 
 # Utilities
+pydantic[email]
 email-validator

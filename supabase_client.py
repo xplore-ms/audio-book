@@ -80,6 +80,7 @@ def _safe_create_signed_url(path: str, ttl: int) -> Optional[str]:
             return None
 
 
+
 def build_playlist_response(job: dict, signed_url_ttl: int = 300):
     pages = job.get("pages", {})
 
@@ -198,3 +199,31 @@ def delete_folder(folder: str) -> dict:
             failed.append(file_path)
 
     return {"deleted": deleted, "failed": failed}
+
+def _safe_create_download_url(path: str, ttl: int, filename: str) -> Optional[str]:
+    """
+    Create a signed URL that forces download.
+    """
+    try:
+        res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(
+            path,
+            ttl,
+            {
+                "response-content-disposition": f'attachment; filename="{filename}"'
+            }
+        )
+        return res.get("signedURL") or res.get("signed_url")
+    except Exception:
+        try:
+            res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(
+                path,
+                ttl,
+                {
+                    "response-content-disposition": f'attachment; filename="{filename}"'
+                }
+            )
+            return res.get("signedURL") or res.get("signed_url")
+        except Exception as e:
+            print(f"[DownloadURL] Failed for {path}: {e}")
+            return None
+

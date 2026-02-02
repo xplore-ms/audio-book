@@ -1,7 +1,7 @@
 import time
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse, JSONResponse
-from supabase_client import _safe_create_signed_url, download_to_bytes, extract_storage_path
+from supabase_client import _safe_create_signed_url, download_to_bytes, extract_storage_path, _safe_create_download_url
 from credits.service import  (
     require_credits,
     deduct_credits_atomic,
@@ -180,8 +180,17 @@ def get_pages(job_id: str, skip: int = 0, limit: int = 5, user=Depends(get_curre
     if not job or "pages" not in job:
         raise HTTPException(404, "Pages not found")
 
-    if job.get("shared") is not True and job["user_id"] != str(user["_id"]):
-        raise HTTPException(403, "Access denied")
+    if job["user_id"] != str(user["_id"]):
+        if job.get("shared") is not True:
+            raise HTTPException(403, "Access denied")
+
+        shared_emails = [
+            s["email"] for s in job.get("shared_with", [])
+        ]
+
+        if user["email"].lower() not in shared_emails:
+            raise HTTPException(403, "Access denied")
+
 
     pages = job.get("pages", {})
     
@@ -193,7 +202,7 @@ def get_pages(job_id: str, skip: int = 0, limit: int = 5, user=Depends(get_curre
 
     playlist = []
     now = int(time.time())
-    expires_at = now + 300  # 5 minutes TTL for signed URLs
+    expires_at = now + 900  # 5 minutes TTL for signed URLs
 
     for key in paged_keys:
         page = pages[key]
@@ -201,12 +210,18 @@ def get_pages(job_id: str, skip: int = 0, limit: int = 5, user=Depends(get_curre
         if not audio_path:
             continue
 
-        audio_url = _safe_create_signed_url(audio_path, 300)
-        sync_url = _safe_create_signed_url(page["sync_path"], 300) if page.get("sync_path") else None
+        audio_url = _safe_create_signed_url(audio_path, 900)
+        download_url = _safe_create_download_url(
+            audio_path,
+            900,
+            filename=f"{job.get('title', 'audio')}_{key}.mp3"
+        )
+        sync_url = _safe_create_signed_url(page["sync_path"], 900) if page.get("sync_path") else None
 
         playlist.append({
             "page": key,
             "audio_url": audio_url,
+            "download_url": download_url,
             "sync_url": sync_url,
             "duration": page.get("duration", 0),
             "expires_at": expires_at
@@ -222,16 +237,45 @@ def get_pages(job_id: str, skip: int = 0, limit: int = 5, user=Depends(get_curre
     }
 
 
-@router.post("/share/{job_id}")
-def share_audiobook(job_id: str, user=Depends(get_current_user)):
+from pydantic import BaseModel, EmailStr
+from typing import List
+from datetime import datetime
+
+class ShareWithEmailsPayload(BaseModel):
+    emails: List[EmailStr]
+
+@router.post("/share/{job_id}/emails")
+def share_audiobook_with_emails(
+    job_id: str,
+    payload: ShareWithEmailsPayload,
+    user=Depends(get_current_user)
+):
     result = jobs_collection.update_one(
         {"job_id": job_id, "user_id": str(user["_id"])},
-        {"$set": {"shared": True}}
+        {
+            "$set": {"shared": True},
+            "$addToSet": {
+                "shared_with": {
+                    "$each": [
+                        {
+                            "email": email.lower(),
+                            "added_at": datetime.utcnow()
+                        }
+                        for email in payload.emails
+                    ]
+                }
+            }
+        }
     )
+
     if result.matched_count == 0:
         raise HTTPException(404, "Job not found")
 
-    return {"message": "Job updated successfully"}
+    return {
+        "message": "Audiobook shared successfully",
+        "shared_with": payload.emails
+    }
+
 
 @router.get("/unshare/{job_id}")
 def unshare_audiobook(job_id: str, user=Depends(get_current_user)):
