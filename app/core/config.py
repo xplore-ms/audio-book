@@ -27,3 +27,18 @@ MONGO_SERVER_SELECTION_TIMEOUT_MS = int(os.getenv("MONGO_SERVER_SELECTION_TIMEOU
 MONGO_SOCKET_TIMEOUT_MS = int(os.getenv("MONGO_SOCKET_TIMEOUT_MS", str(300_000)))
 MONGO_RETRY_WRITES = os.getenv("MONGO_RETRY_WRITES", "1") not in ("0", "false", "False")
 MONGO_TLS = os.getenv("MONGO_TLS", "1") not in ("0", "false", "False")
+
+# Redis / Celery
+REDIS_BROKER = os.getenv("REDIS_BROKER", "redis://localhost:6379/0")
+REDIS_BACKEND = os.getenv("REDIS_BACKEND", "redis://localhost:6379/1")
+
+# Supabase Auth / Client
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# Payment
+PAYSTACK_SECRET = os.getenv("PAYSTACK_SECRET")
+
+# Mail
+MAIL_USERNAME = os.getenv("MAIL_USERNAME")
+MAIL_PASSWORD = os.getenv("MAIL_PASSWORD")

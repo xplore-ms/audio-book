@@ -4,7 +4,9 @@ from jose import jwt, JWTError
 import os
 from  app.db.mongo import users_collection
 
-JWT_SECRET = os.getenv("JWT_SECRET", "token-secret-change-me")
+from app.core import config
+
+JWT_SECRET = config.JWT_SECRET
 JWT_ALGO = "HS256"
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")

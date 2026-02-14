@@ -15,7 +15,9 @@ class InitiatePaymentRequest(BaseModel):
     credits: int
 
 load_dotenv()
-PAYSTACK_SECRET = os.getenv("PAYSTACK_SECRET")
+from app.core import config
+
+PAYSTACK_SECRET = config.PAYSTACK_SECRET
 PAYSTACK_BASE = "https://api.paystack.co"
 
 router = APIRouter(prefix="/payments", tags=["Payments"])

@@ -28,8 +28,10 @@ class UpdateJobRequest(BaseModel):
 
 
 load_dotenv()
-MAIL_USERNAME = os.getenv("MAIL_USERNAME")
-MAIL_PASSWORD = os.getenv("MAIL_PASSWORD")
+from app.core import config
+
+MAIL_USERNAME = config.MAIL_USERNAME
+MAIL_PASSWORD = config.MAIL_PASSWORD
 router = APIRouter(prefix="", tags=["Jobs"])
 
 celery = Celery("worker")

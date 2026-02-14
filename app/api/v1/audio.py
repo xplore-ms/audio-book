@@ -17,7 +17,9 @@ load_dotenv()
 router = APIRouter(prefix="/audio", tags=["Audio"])
 WAV_HEADER_SIZE = 44
 
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "reading_app")
+from app.core import config
+
+SUPABASE_BUCKET = config.SUPABASE_BUCKET
 
 class ShareWithEmailsPayload(BaseModel):
     emails: List[EmailStr]

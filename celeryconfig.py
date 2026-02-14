@@ -3,8 +3,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-broker_url = os.getenv("REDIS_BROKER", "redis://localhost:6379/0")
-result_backend = os.getenv("REDIS_BACKEND", "redis://localhost:6379/1")
+from app.core import config
+
+broker_url = config.REDIS_BROKER
+result_backend = config.REDIS_BACKEND
 
 task_serializer = "json"
 result_serializer = "json"

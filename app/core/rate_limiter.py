@@ -4,7 +4,9 @@ from fastapi import HTTPException
 from dotenv import load_dotenv
 load_dotenv()
 
-REDIS_URL = os.getenv("REDIS_BROKER", "redis://localhost:6379/0")
+from app.core import config
+
+REDIS_URL = config.REDIS_BROKER
 
 redis_client = redis.from_url(
     REDIS_URL,

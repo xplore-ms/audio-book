@@ -5,7 +5,9 @@ import base64
 from datetime import datetime, timedelta
 from jose import jwt
 
-JWT_SECRET = os.getenv("JWT_SECRET", "token-secret-change-me")
+from app.core import config
+
+JWT_SECRET = config.JWT_SECRET
 JWT_ALGO = "HS256"
 
 # Password hashing config
