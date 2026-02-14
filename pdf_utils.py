@@ -1,10 +1,4 @@
-import fitz  # PyMuPDF
+from app.utils.pdf import get_num_pages_from_bytes
 
-
-def get_num_pages_from_bytes(pdf_bytes: bytes) -> int:
-    """
-    Return the number of pages in a PDF (from bytes).
-    """
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-        return doc.page_count
+__all__ = ["get_num_pages_from_bytes"]
 

@@ -1,26 +1,36 @@
-# Dockerfile
 FROM python:3.11-slim
 
-# Set working directory
+# Environment hardening
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Create non-root user
+RUN useradd -m appuser
+
 WORKDIR /app
 
-# System dependencies for pydub + ffmpeg
+# System dependencies
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy project files
-COPY . .
-
-# Install Python dependencies
+# Install dependencies FIRST (cache-friendly)
+COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Ensure logs directory exists
-RUN mkdir -p /app/logs
+# Copy app code
+COPY . .
 
-# Environment
-ENV PYTHONUNBUFFERED=1
+# Ensure permissions
+RUN chown -R appuser:appuser /app
 
-# Default command (Render will override per service)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Switch user
+USER appuser
+
+# Production server
+CMD ["gunicorn", "app.main:app", \
+     "-k", "uvicorn.workers.UvicornWorker", \
+     "--bind", "0.0.0.0:8000", \
+     "--workers", "4", \
+     "--timeout", "120"]
