@@ -1,6 +1,7 @@
 # Core
 fastapi
 uvicorn[standard]
+gunicorn
 python-dotenv
 python-multipart
 httpx
@@ -15,6 +16,7 @@ redis
 
 # Database
 pymongo
+motor
 
 # PDF processing
 pymupdf
