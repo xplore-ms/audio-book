@@ -360,8 +360,46 @@ def request_full_review(
         "job_id": job_id
     }
 
+TASK_TIMEOUT = timedelta(hours=1)
+
+def finalize_stuck_tasks(tasks):
+    now = datetime.utcnow()
+    updated = False
+
+    for task in tasks:
+        if task["state"] in ("SUCCESS", "FAILED"):
+            continue
+
+        created_at = task.get("created_at")
+        if created_at and (now - created_at) > TASK_TIMEOUT:
+            job_tasks.update_one(
+                {"_id": task["_id"]},
+                {"$set": {
+                    "state": "FAILED",
+                    "progress": 100,
+                    "error": "Task timed out",
+                    "updated_at": now
+                }}
+            )
+            task["state"] = "FAILED"
+            task["progress"] = 100
+            updated = True
+
+    return updated
+
+
+def all_tasks_terminal(tasks):
+    return all(t["state"] in ("SUCCESS", "FAILED") for t in tasks)
+
+def calculate_progress(tasks):
+    if not tasks:
+        return 0
+    return round(sum(t.get("progress", 0) for t in tasks) / len(tasks))
+
+
 @router.get("/job/{job_id}/progress")
 def get_job_progress(job_id: str, user=Depends(get_current_user)):
+
     job = jobs_collection.find_one({
         "job_id": job_id,
         "user_id": str(user["_id"])
@@ -371,29 +409,52 @@ def get_job_progress(job_id: str, user=Depends(get_current_user)):
         raise HTTPException(404, "Job not found")
 
     processing_id = job.get("processing_id")
-
     if not processing_id:
-        return {"status": "not_found", "progress": 0}
-
-    tasks = list(job_tasks.find(
-        {
-            "job_id": job_id,
-            "processing_id": processing_id 
-        },
-        {"_id": 0, "page": 1, "state": 1, "progress": 1}
-    ))
-
-    if not tasks:
         return {"status": "processing", "progress": 0}
 
-    avg_progress = sum(t["progress"] for t in tasks) / len(tasks)
+    tasks = list(job_tasks.find(
+        {"job_id": job_id, "processing_id": processing_id}
+    ))
 
+    # Step 1: Finalize stuck tasks
+    finalize_stuck_tasks(tasks)
+
+    for task in tasks:
+        task["_id"] = str(task["_id"])
+
+    # Step 2: Decide job completion
+    job_created_at = job.get("created_at")
+    job_timed_out = (
+        job_created_at and
+        (datetime.utcnow() - job_created_at) > timedelta(hours=1)
+    )
+
+    if all_tasks_terminal(tasks) or job_timed_out:
+        if job.get("status") != "done":
+            jobs_collection.update_one(
+                {"job_id": job_id},
+                {"$set": {
+                    "status": "done",
+                    "completed_at": datetime.utcnow()
+                }}
+            )
+
+        return {
+            "status": "done",
+            "processing_id": processing_id,
+            "progress": 100,
+            "tasks": tasks
+        }
+
+    # Step 3: Still processing
     return {
-        "status": job["status"],
+        "status": "processing",
         "processing_id": processing_id,
-        "progress": round(avg_progress),
+        "progress": calculate_progress(tasks),
         "tasks": tasks
     }
+
+
 
 @router.get("/status/{task_id}")
 def get_status(
