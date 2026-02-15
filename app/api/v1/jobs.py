@@ -483,7 +483,7 @@ def my_activity(user=Depends(get_current_user)):
     jobs = jobs_collection.find(
         {"user_id": str(user["_id"])},
         {"_id": 0, "job_id": 1, "num_pages": 1, "created_at": 1, "review_status": 1}
-    )
+    ).sort("created_at", -1)
 
     return {
         "email": user["email"],

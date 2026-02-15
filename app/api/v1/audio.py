@@ -38,7 +38,7 @@ def my_audios(user=Depends(get_current_user)):
             "file_name": 1,
             "created_at": 1
         }
-    )
+    ).sort("created_at", -1)
     return list(jobs)
 
 
