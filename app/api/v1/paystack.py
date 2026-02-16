@@ -13,6 +13,7 @@ DISCOUNT_THRESHOLD = 500
 
 class InitiatePaymentRequest(BaseModel):
     credits: int
+    callback_url: str | None = None
 
 load_dotenv()
 from app.core import config
@@ -67,21 +68,26 @@ def initiate_payment(
     credits = payload.credits
     amount_kobo = calculate_price_kobo(credits)
 
+    paystack_payload = {
+        "email": user["email"],
+        "amount": amount_kobo,
+        "currency": "NGN",  # IMPORTANT: always NGN
+        "metadata": {
+            "credits": credits,
+            "user_id": str(user["_id"]),
+        },
+    }
+    
+    if payload.callback_url:
+        paystack_payload["callback_url"] = payload.callback_url
+
     res = requests.post(
         f"{PAYSTACK_BASE}/transaction/initialize",
         headers={
             "Authorization": f"Bearer {PAYSTACK_SECRET}",
             "Content-Type": "application/json",
         },
-        json={
-            "email": user["email"],
-            "amount": amount_kobo,
-            "currency": "NGN",  # IMPORTANT: always NGN
-            "metadata": {
-                "credits": credits,
-                "user_id": str(user["_id"]),
-            },
-        },
+        json=paystack_payload,
     )
     if not res.ok:
         raise HTTPException(400, "Paystack initialization failed")
@@ -122,8 +128,12 @@ def verify_payment(
         },
     )
 
+    print(f"Verifying reference: {reference}")
+    print(f"Paystack Response Status: {res.status_code}")
+    print(f"Paystack Response Body: {res.text}")
+
     if not res.ok:
-        raise HTTPException(400, "Verification failed")
+        raise HTTPException(400, f"Verification failed: {res.text}")
 
     data = res.json()["data"]
     if data["status"] != "success":

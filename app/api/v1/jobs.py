@@ -455,29 +455,6 @@ def get_job_progress(job_id: str, user=Depends(get_current_user)):
     }
 
 
-
-@router.get("/status/{task_id}")
-def get_status(
-    task_id: str,
-    user=Depends(get_current_user)
-):
-    job = jobs_collection.find_one({
-        "task_ids": task_id,
-        "user_id": str(user["_id"])
-    })
-
-    print(job)
-    if not job:
-        raise HTTPException(403, "Not authorized")
-
-    async_result = celery.AsyncResult(task_id)
-    print(async_result.state, 
-         async_result.result)
-    return {
-        "state": async_result.state, 
-        "result": async_result.result
-    }
-
 @router.get("/me/activity")
 def my_activity(user=Depends(get_current_user)):
     jobs = jobs_collection.find(
