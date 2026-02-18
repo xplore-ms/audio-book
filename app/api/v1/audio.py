@@ -7,7 +7,7 @@ from pydantic import BaseModel, EmailStr
 from typing import List
 from datetime import datetime
 
-from app.db.mongo import jobs_collection
+from app.db.mongo import jobs_collection, users_collection
 import io
 import os
 import wave
@@ -27,19 +27,43 @@ class ShareWithEmailsPayload(BaseModel):
 @router.get("/my")
 def my_audios(user=Depends(get_current_user)):
     """
-    Fetch all completed audios for the authenticated user
+    Fetch all completed audios for the authenticated user (owned + shared)
     """
-    jobs = jobs_collection.find(
-        {"user_id": str(user["_id"])},
+    user_id = str(user["_id"])
+    # Ensure email is lowercase to match stored format
+    user_email = user["email"].lower()
+
+    jobs_cursor = jobs_collection.find(
+        {
+            "$or": [
+                {"user_id": user_id},
+                {"shared_with.email": user_email}
+            ]
+        },
         {
             "_id": 0, 
             "job_id": 1, 
             "title": 1, 
             "file_name": 1,
-            "created_at": 1
+            "created_at": 1,
+            "user_id": 1
         }
     ).sort("created_at", -1)
-    return list(jobs)
+
+    results = []
+    for job in jobs_cursor:
+        # Determine if current user is the owner
+        is_owner = (job.get("user_id") == user_id)
+        
+        results.append({
+            "job_id": job["job_id"],
+            "title": job.get("title"),
+            "file_name": job.get("file_name"),
+            "created_at": job.get("created_at"),
+            "is_owner": is_owner
+        })
+
+    return results
 
 
 @router.get("/sync/{job_id}")
@@ -82,7 +106,6 @@ def get_pages(
 
 
     pages = job.get("pages", {})
-    
     # Sort keys
     try:
         ordered_keys = sorted(pages.keys(), key=lambda k: int(k.split("_")[-1]))
@@ -159,6 +182,18 @@ def share_audiobook_with_emails(
     payload: ShareWithEmailsPayload,
     user=Depends(get_current_user)
 ):
+    # Verify valid emails
+    emails_to_check = [email.lower() for email in payload.emails]
+    existing_users = users_collection.find({"email": {"$in": emails_to_check}})
+    existing_emails = {u["email"] for u in existing_users}
+
+    missing_emails = set(emails_to_check) - existing_emails
+    if missing_emails:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The following emails are not registered: {', '.join(missing_emails)}"
+        )
+
     result = jobs_collection.update_one(
         {"job_id": job_id, "user_id": str(user["_id"])},
         {
@@ -167,10 +202,10 @@ def share_audiobook_with_emails(
                 "shared_with": {
                     "$each": [
                         {
-                            "email": email.lower(),
+                            "email": email,
                             "added_at": datetime.utcnow()
                         }
-                        for email in payload.emails
+                        for email in existing_emails
                     ]
                 }
             }
@@ -182,7 +217,7 @@ def share_audiobook_with_emails(
 
     return {
         "message": "Audiobook shared successfully",
-        "shared_with": payload.emails
+        "shared_with": list(existing_emails)
     }
 
 
@@ -237,7 +272,7 @@ def get_hls_playlist(
         content_str = content_bytes.decode("utf-8")
     except Exception as e:
         print(f"Failed to download playlist: {e}")
-        raise HTTPException(500, "Failed to retrieve playlist")
+        raise HTTPException(404, "Playlist not found")
 
     # Parse and rewrite
     lines = content_str.splitlines()
