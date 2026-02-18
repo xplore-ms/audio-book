@@ -113,6 +113,11 @@ def get_pages(
             # Use backend proxy for HLS to handle segment signing
             # Construct absolute URL to our HLS endpoint
             base_url = str(request.base_url).rstrip("/")
+            # Force HTTPS on non-local environments (e.g. Cloud Run, Render) since
+            # proxies often terminate SSL and request.base_url might be http
+            if "localhost" not in base_url and "127.0.0.1" not in base_url and base_url.startswith("http://"):
+                base_url = base_url.replace("http://", "https://", 1)
+
             audio_url = f"{base_url}/api/v1/audio/hls/{job_id}/{key}/playlist.m3u8?token={token}"
         else:
             # Fallback for legacy single file
