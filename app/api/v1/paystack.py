@@ -1,19 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import os
 from dotenv import load_dotenv
-from  app.db.mongo import users_collection, payments_collection
+from app.db.mongo import users_collection, payments_collection
 from app.core.dependencies import get_current_user
-
 from pydantic import BaseModel
-BASE_PRICE_KOBO = 500  # ₦5
-DISCOUNT_PRICE_KOBO = 250  # ₦2.5
-DISCOUNT_THRESHOLD = 500
 
-class InitiatePaymentRequest(BaseModel):
-    credits: int
-    callback_url: str | None = None
+BASE_PRICE_KOBO = 5000  # ₦50 per credit
 
 load_dotenv()
 from app.core import config
@@ -23,43 +17,87 @@ PAYSTACK_BASE = "https://api.paystack.co"
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
+# ---------------- FX CONFIG ----------------
+FX_API_URL = "https://open.er-api.com/v6/latest/USD"
+FX_CACHE_TTL = timedelta(minutes=10)
+
+_fx_cache = {
+    "rate": None,
+    "expires_at": None
+}
+# ------------------------------------------
+
+
+class InitiatePaymentRequest(BaseModel):
+    credits: int
+    callback_url: str | None = None
+
+
 def calculate_price_kobo(credits: int) -> int:
     if credits <= 0:
         raise ValueError("Invalid credit amount")
-
-    price_per_credit = (
-        DISCOUNT_PRICE_KOBO if credits >= DISCOUNT_THRESHOLD else BASE_PRICE_KOBO
-    )
-    return credits * price_per_credit
+    return credits * BASE_PRICE_KOBO
 
 
+def get_usd_to_ngn_rate() -> float:
+    """
+    Fetch real-time USD → NGN rate with simple caching
+    """
+    now = datetime.utcnow()
+
+    if (
+        _fx_cache["rate"] is not None
+        and _fx_cache["expires_at"] is not None
+        and now < _fx_cache["expires_at"]
+    ):
+        return _fx_cache["rate"]
+
+    try:
+        res = requests.get(FX_API_URL, timeout=5)
+        res.raise_for_status()
+        data = res.json()
+
+        rate = data["rates"]["NGN"]
+
+        _fx_cache["rate"] = rate
+        _fx_cache["expires_at"] = now + FX_CACHE_TTL
+
+        return rate
+    except Exception:
+        # Fallback to last known rate or safe default
+        return _fx_cache["rate"] or 1600.0
+
+
+# ------------------ PRICE QUOTE ------------------
 @router.get("/quote")
 def get_price_quote(
     credits: int = Query(..., gt=0),
     currency: str = Query("NGN")
 ):
     amount_kobo = calculate_price_kobo(credits)
+    amount_ngn = amount_kobo / 100
 
     if currency == "USD":
-        # simple fixed conversion (safe + predictable)
-        USD_RATE = 1600  # ₦1600 = $1 (you can update later)
-        amount_usd = round((amount_kobo / 100) / USD_RATE, 2)
+        usd_to_ngn = get_usd_to_ngn_rate()
+        amount_usd = round(amount_ngn / usd_to_ngn, 2)
 
         return {
             "credits": credits,
             "currency": "USD",
             "amount": amount_usd,
+            "rate": usd_to_ngn,
             "display": f"${amount_usd}",
         }
 
     return {
         "credits": credits,
         "currency": "NGN",
-        "amount": amount_kobo / 100,
-        "display": f"₦{amount_kobo / 100:,}",
+        "amount": amount_ngn,
+        "display": f"₦{amount_ngn:,}",
     }
 
 
+# ------------------ INITIATE PAYMENT ------------------
 @router.post("/initiate")
 def initiate_payment(
     payload: InitiatePaymentRequest,
@@ -71,13 +109,13 @@ def initiate_payment(
     paystack_payload = {
         "email": user["email"],
         "amount": amount_kobo,
-        "currency": "NGN",  # IMPORTANT: always NGN
+        "currency": "NGN",  # ALWAYS NGN
         "metadata": {
             "credits": credits,
             "user_id": str(user["_id"]),
         },
     }
-    
+
     if payload.callback_url:
         paystack_payload["callback_url"] = payload.callback_url
 
@@ -89,6 +127,7 @@ def initiate_payment(
         },
         json=paystack_payload,
     )
+
     if not res.ok:
         raise HTTPException(400, "Paystack initialization failed")
 
@@ -109,6 +148,7 @@ def initiate_payment(
     }
 
 
+# ------------------ VERIFY PAYMENT ------------------
 @router.post("/verify/{reference}")
 def verify_payment(
     reference: str,
@@ -128,10 +168,6 @@ def verify_payment(
         },
     )
 
-    print(f"Verifying reference: {reference}")
-    print(f"Paystack Response Status: {res.status_code}")
-    print(f"Paystack Response Body: {res.text}")
-
     if not res.ok:
         raise HTTPException(400, f"Verification failed: {res.text}")
 
@@ -141,7 +177,7 @@ def verify_payment(
 
     if user["_id"] != payment["user_id"]:
         raise HTTPException(403, "Unauthorized verification attempt")
-    # Credit user
+
     users_collection.update_one(
         {"_id": payment["user_id"]},
         {"$inc": {"credits": payment["credits"]}}
