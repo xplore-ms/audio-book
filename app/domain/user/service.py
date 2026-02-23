@@ -7,12 +7,15 @@ from celery import Celery
 
 from app.domain.user.repository import UserRepository
 from app.domain.user.schemas import UserInDB, UserCreate
+from jose import jwt
 from app.core.security import (
     hash_password,
     verify_password,
     create_access_token,
     create_refresh_token,
     hash_refresh_token,
+    JWT_SECRET,
+    JWT_ALGO,
 )
 from app.db import mongo
 
@@ -153,4 +156,45 @@ class UserService:
     async def get_me(self, user: dict):
         # Do not expose sensitive fields
         return {"email": user["email"], "credits": user.get("credits", 0)}
+
+    async def refresh_user_token(self, refresh_token: str):
+        try:
+            payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGO])
+            if payload.get("type") != "refresh":
+                raise ValueError("Invalid token type")
+            email = payload.get("sub")
+            if not email:
+                raise ValueError("Invalid token payload")
+        except Exception:
+            raise ValueError("Invalid or expired refresh token")
+
+        user = await self.repo.find_by_email(email)
+        if not user or user.get("is_suspended"):
+            raise ValueError("User not found or suspended")
+
+        # Verify hash match
+        token_hash = hash_refresh_token(refresh_token)
+        if user.get("refresh_token_hash") != token_hash:
+            raise ValueError("Invalid refresh token")
+
+        # Verify expiration
+        if user.get("refresh_token_expires") and user.get("refresh_token_expires") < datetime.utcnow():
+            raise ValueError("Refresh token expired")
+
+        # Generate new tokens
+        new_access_token = create_access_token(email)
+        new_refresh_token = create_refresh_token(email)
+
+        # Update user with new refresh token hash
+        update = {"$set": {
+            "refresh_token_hash": hash_refresh_token(new_refresh_token),
+            "refresh_token_expires": datetime.utcnow() + timedelta(days=30)
+        }}
+        await self.repo.update_by_id(user["_id"], update)
+
+        return {
+            "access_token": new_access_token,
+            "refresh_token": new_refresh_token,
+            "token_type": "bearer"
+        }
 
