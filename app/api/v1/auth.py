@@ -88,3 +88,12 @@ async def reset_password(email: str = Form(...), code: str = Form(...), new_pass
 async def get_me(user=Depends(get_current_user)):
     svc = user_service.UserService.default()
     return await svc.get_me(user)
+
+
+@router.post("/refresh-token")
+async def refresh_token(refresh_token: str = Form(...)):
+    svc = user_service.UserService.default()
+    try:
+        return await svc.refresh_user_token(refresh_token)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
