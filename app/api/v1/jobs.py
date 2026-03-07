@@ -299,24 +299,8 @@ def start_job(
     # Plan-based rate limiting (Cooldowns)
     plan_id = user.get("active_plan_id")
 
-    if plan_id == "mastery":
-        # Reset after each processing completed = Can only have 1 active standard processing
-        active_job = jobs_collection.find_one(
-            {
-                "user_id": str(user["_id"]),
-                "status": "processing",
-                "review_required": {"$ne": True},  # Exclude full review jobs
-            }
-        )
-        if active_job:
-            raise HTTPException(
-                429,
-                "Mastery Perk: You can start another quick processing as soon as your current one completes.",
-            )
-    else:
-        # Time-based cooldowns
-        cooldown = PLAN_QUICK_COOLDOWNS.get(plan_id, 14400)  # Default 4 hours for free
-        rate_limit(key=f"quick_start:{user['_id']}", limit=1, window_seconds=cooldown)
+    cooldown = PLAN_QUICK_COOLDOWNS.get(plan_id, 14400)  # Default 4 hours for free
+    rate_limit(key=f"quick_start:{user['_id']}", limit=1, window_seconds=cooldown)
 
     job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
 
