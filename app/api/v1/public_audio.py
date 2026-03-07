@@ -13,18 +13,21 @@ public_router = APIRouter(prefix="/public", tags=["Public Library"])
 def list_public_audios():
     jobs = jobs_collection.find(
         {"is_admin": True},
-        {"_id": 0, "job_id": 1, "required_credits": 1,"title": 1, 
+        {
+            "_id": 0,
+            "job_id": 1,
+            "required_credits": 1,
+            "title": 1,
             "file_name": 1,
-            "created_at": 1}
+            "created_at": 1,
+        },
     )
     return list(jobs)
 
+
 @public_router.get("/listen/{job_id}")
 def listen_public_audio(job_id: str, user=Depends(get_current_user)):
-    job = jobs_collection.find_one({
-        "job_id": job_id,
-        "is_admin": True
-    })
+    job = jobs_collection.find_one({"job_id": job_id, "is_admin": True})
 
     if not job or "pages" not in job:
         raise HTTPException(404, "Audio not found")
@@ -34,34 +37,27 @@ def listen_public_audio(job_id: str, user=Depends(get_current_user)):
     user_credits = user_doc.get("credits", 0)
     required = job.get("required_credits", 0)
 
-    
-
-   
     if not job.get("credits_charged"):
         if user_credits < required:
             raise HTTPException(
                 status_code=403,
-                detail=f"Not enough credits. Required: {required}, you have: {user_credits}"
+                detail=f"Not enough credits. Required: {required}, you have: {user_credits}",
             )
         users_collection.update_one(
-            {"_id": user["_id"]},
-            {"$inc": {"credits": -required}}
+            {"_id": user["_id"]}, {"$inc": {"credits": -required}}
         )
         jobs_collection.update_one(
-            {"_id": job["_id"]},
-            {"$set": {"credits_charged": True}}
+            {"_id": job["_id"]}, {"$set": {"credits_charged": True}}
         )
 
     return build_playlist_response(job)
+
 
 @public_router.get("/download/{job_id}")
 def download_public_audio(job_id: str, token: str = Query(...)):
     user = get_current_user(token)
 
-    job = jobs_collection.find_one({
-        "job_id": job_id,
-        "is_admin": True
-    })
+    job = jobs_collection.find_one({"job_id": job_id, "is_admin": True})
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -82,13 +78,10 @@ def download_public_audio(job_id: str, token: str = Query(...)):
     if user_credits < required:
         raise HTTPException(
             status_code=403,
-            detail=f"Not enough credits. Required: {required}, you have: {user_credits}"
+            detail=f"Not enough credits. Required: {required}, you have: {user_credits}",
         )
 
-    users_collection.update_one(
-        {"_id": user["_id"]},
-        {"$inc": {"credits": -required}}
-    )
+    users_collection.update_one({"_id": user["_id"]}, {"$inc": {"credits": -required}})
 
     # ---- Build final WAV ----
     pcm_chunks = []
@@ -101,9 +94,7 @@ def download_public_audio(job_id: str, token: str = Query(...)):
         return public_url.split(marker, 1)[1]
 
     for _, page in ordered_pages:
-        wav_bytes = download_to_bytes(
-            extract_storage_path(page["audio_url"])
-        )
+        wav_bytes = download_to_bytes(extract_storage_path(page["audio_url"]))
 
         with wave.open(io.BytesIO(wav_bytes), "rb") as w:
             if params is None:
@@ -126,8 +117,8 @@ def download_public_audio(job_id: str, token: str = Query(...)):
         media_type="audio/wav",
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store"
-        }
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -138,4 +129,3 @@ def get_sync(job_id: str):
         raise HTTPException(status_code=404, detail="Sync info not available")
 
     return JSONResponse({"pages": job["pages"]})
-

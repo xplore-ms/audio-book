@@ -1,8 +1,9 @@
 from fastapi import APIRouter
 from datetime import datetime
-from  app.db.mongo import client
+from app.db.mongo import client
 
 router = APIRouter(prefix="/health", tags=["Health"])
+
 
 # ------------------------------------
 # 1️⃣ WAKE-UP ENDPOINT
@@ -13,10 +14,7 @@ def wake_up():
     Called silently by frontend on site load.
     Purpose: wake Render instance.
     """
-    return {
-        "status": "waking",
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return {"status": "waking", "timestamp": datetime.utcnow().isoformat()}
 
 
 # ------------------------------------
@@ -41,5 +39,5 @@ def readiness_check():
     return {
         "ready": mongo_ok,
         "mongo": mongo_ok,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
     }

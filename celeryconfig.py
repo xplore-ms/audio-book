@@ -1,12 +1,8 @@
-import os
-from dotenv import load_dotenv
-load_dotenv()
+from app.core.config import settings
 
+broker_url = settings.redis.REDIS_BROKER
+result_backend = settings.redis.REDIS_BACKEND
 
-from app.core import config
-
-broker_url = config.REDIS_BROKER
-result_backend = config.REDIS_BACKEND
 
 task_serializer = "json"
 result_serializer = "json"

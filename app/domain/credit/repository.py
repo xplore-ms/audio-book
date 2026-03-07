@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from app.db.mongo import users_collection
 
 
@@ -8,7 +8,9 @@ def get_user_credits(user_id: str) -> int:
 
 
 def deduct_credits_atomic(user_id: str, amount: int):
-    return users_collection.update_one({"_id": user_id, "credits": {"$gte": amount}}, {"$inc": {"credits": -amount}})
+    return users_collection.update_one(
+        {"_id": user_id, "credits": {"$gte": amount}}, {"$inc": {"credits": -amount}}
+    )
 
 
 def require_credits(user: Dict[str, Any], amount: int):

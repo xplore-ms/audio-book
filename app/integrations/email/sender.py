@@ -3,7 +3,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 
-def send_email(to_email: str, subject: str, message: str, sender_email: str, sender_password: str):
+def send_email(
+    to_email: str, subject: str, message: str, sender_email: str, sender_password: str
+):
     msg = MIMEMultipart()
     msg["From"] = sender_email
     msg["To"] = to_email
