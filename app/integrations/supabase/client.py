@@ -1,47 +1,44 @@
 # supabase_client.py
-import os
 import time
 from typing import Optional
-from dotenv import load_dotenv
-load_dotenv()
-
 from supabase import create_client, Client
 
-from app.core import config
+from app.core.config import settings
 
-SUPABASE_URL = config.SUPABASE_URL
-SUPABASE_KEY = config.SUPABASE_KEY
-SUPABASE_BUCKET = config.SUPABASE_BUCKET
+SUPABASE_URL = settings.storage.SUPABASE_URL
+SUPABASE_KEY = settings.storage.SUPABASE_KEY
+SUPABASE_BUCKET = settings.storage.SUPABASE_BUCKET
+
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 def create_signed_url(path: str, expires_in: int = 300) -> str:
     """
     Create a signed URL for a private Supabase object.
     """
-    res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(
-        path,
-        expires_in
-    )
+    res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(path, expires_in)
 
     if isinstance(res, dict):
         return res.get("signedURL") or res.get("signed_url")
 
     raise RuntimeError("Failed to create signed URL")
 
+
 def upload_bytes(path: str, data: bytes, content_type="application/octet-stream"):
     supabase.storage.from_(SUPABASE_BUCKET).upload(
-        path,
-        data,
-        {"content-type": content_type, "upsert": "true"}
+        path, data, {"content-type": content_type, "upsert": "true"}
     )
     return path  # RETURN PATH, NOT URL
 
 
-def upload_file(local_path: str, remote_path: str, content_type="application/octet-stream") -> str:
+def upload_file(
+    local_path: str, remote_path: str, content_type="application/octet-stream"
+) -> str:
     with open(local_path, "rb") as f:
         data = f.read()
     return upload_bytes(remote_path, data, content_type)
+
 
 def download_to_bytes(remote_path: str) -> bytes:
     res = supabase.storage.from_(SUPABASE_BUCKET).download(remote_path)
@@ -71,7 +68,6 @@ def _safe_create_signed_url(path: str, ttl: int) -> Optional[str]:
         except Exception as e:
             print(f"[SignedURL] Failed for {path}: {e}")
             return None
-
 
 
 def build_playlist_response(job: dict, signed_url_ttl: int = 300):
@@ -104,19 +100,17 @@ def build_playlist_response(job: dict, signed_url_ttl: int = 300):
         if sync_path:
             sync_url = _safe_create_signed_url(sync_path, signed_url_ttl)
 
-        playlist.append({
-            "page": key,
-            "audio_url": audio_url,
-            "sync_url": sync_url,
-            "duration": page.get("duration", 0),
-            "expires_at": expires_at
-        })
+        playlist.append(
+            {
+                "page": key,
+                "audio_url": audio_url,
+                "sync_url": sync_url,
+                "duration": page.get("duration", 0),
+                "expires_at": expires_at,
+            }
+        )
 
-    return {
-        "job_id": job.get("job_id"),
-        "title": job.get("title"),
-        "pages": playlist
-    }
+    return {"job_id": job.get("job_id"), "title": job.get("title"), "pages": playlist}
 
 
 def list_files(folder: str):
@@ -138,7 +132,9 @@ def list_files(folder: str):
         offset = 0
         while True:
             try:
-                batch = supabase.storage.from_(SUPABASE_BUCKET).list(folder, {"limit": limit, "offset": offset})
+                batch = supabase.storage.from_(SUPABASE_BUCKET).list(
+                    folder, {"limit": limit, "offset": offset}
+                )
             except Exception:
                 # if vendor client doesn't support offset, re-raise original
                 break
@@ -150,11 +146,13 @@ def list_files(folder: str):
             offset += limit
         return items
 
+
 def extract_storage_path(public_url: str) -> str:
     marker = f"/storage/v1/object/public/{SUPABASE_BUCKET}/"
     if marker not in public_url:
         raise ValueError("Invalid Supabase public URL")
     return public_url.split(marker, 1)[1]
+
 
 def delete_file(path: str) -> bool:
     """
@@ -194,6 +192,7 @@ def delete_folder(folder: str) -> dict:
 
     return {"deleted": deleted, "failed": failed}
 
+
 def _safe_create_download_url(path: str, ttl: int, filename: str) -> Optional[str]:
     """
     Create a signed URL that forces download.
@@ -202,9 +201,7 @@ def _safe_create_download_url(path: str, ttl: int, filename: str) -> Optional[st
         res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(
             path,
             ttl,
-            {
-                "response-content-disposition": f'attachment; filename="{filename}"'
-            }
+            {"response-content-disposition": f'attachment; filename="{filename}"'},
         )
         return res.get("signedURL") or res.get("signed_url")
     except Exception:
@@ -212,12 +209,9 @@ def _safe_create_download_url(path: str, ttl: int, filename: str) -> Optional[st
             res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(
                 path,
                 ttl,
-                {
-                    "response-content-disposition": f'attachment; filename="{filename}"'
-                }
+                {"response-content-disposition": f'attachment; filename="{filename}"'},
             )
             return res.get("signedURL") or res.get("signed_url")
         except Exception as e:
             print(f"[DownloadURL] Failed for {path}: {e}")
             return None
-

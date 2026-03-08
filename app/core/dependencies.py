@@ -1,15 +1,16 @@
 from fastapi import Depends, HTTPException, Query
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
-import os
-from  app.db.mongo import users_collection
+from app.db.mongo import users_collection
 
-from app.core import config
+from app.core.config import settings
 
-JWT_SECRET = config.JWT_SECRET
+JWT_SECRET = settings.security.JWT_SECRET
 JWT_ALGO = "HS256"
 
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
 
 def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
@@ -25,6 +26,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         raise HTTPException(401, "User not found")
 
     return user
+
 
 def get_current_user_from_query(token: str = Query(...)):
     """

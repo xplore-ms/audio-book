@@ -36,5 +36,6 @@ class UserInDB(BaseModel):
     refresh_token_expires: Optional[datetime] = None
     is_suspended: Optional[bool] = None
     role: Optional[str] = None
+    credit_batches: Optional[list] = []
 
     model_config = {"extra": "forbid"}

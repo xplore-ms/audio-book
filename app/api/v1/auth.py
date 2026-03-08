@@ -1,4 +1,3 @@
-from datetime import datetime
 from fastapi import APIRouter, HTTPException, Form, Request
 from fastapi.params import Depends
 from app.core.rate_limiter import rate_limit
@@ -23,7 +22,12 @@ def get_client_ip(request: Request):
 
 
 @router.post("/register")
-async def register(request: Request, email: str = Form(...), password: str = Form(...), device_fingerprint_hash: str = Form(...)):
+async def register(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    device_fingerprint_hash: str = Form(...),
+):
     ip_address = get_client_ip(request)
     rate_limit(f"register:{email}", limit=5, window_seconds=300)
     if ip_address:
@@ -33,7 +37,11 @@ async def register(request: Request, email: str = Form(...), password: str = For
 
     svc = user_service.UserService.default()
     try:
-        user_in = user_service.UserCreate(email=email, password=password, device_fingerprint_hash=device_fingerprint_hash)
+        user_in = user_service.UserCreate(
+            email=email,
+            password=password,
+            device_fingerprint_hash=device_fingerprint_hash,
+        )
         return await svc.register_user(user_in, ip_address, user_agent)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -75,7 +83,9 @@ async def forgot_password(request: Request, email: str = Form(...)):
 
 
 @router.post("/reset-password")
-async def reset_password(email: str = Form(...), code: str = Form(...), new_password: str = Form(...)):
+async def reset_password(
+    email: str = Form(...), code: str = Form(...), new_password: str = Form(...)
+):
     rate_limit(f"reset-password:{email}", limit=5, window_seconds=300)
     svc = user_service.UserService.default()
     try:
