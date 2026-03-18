@@ -1,17 +1,24 @@
 import io
 import wave
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
-from app.db.mongo import jobs_collection, users_collection
-from app.integrations.supabase.client import build_playlist_response, download_to_bytes
+from app.db.mongo import (
+    jobs_collection_async as jobs_collection,
+    users_collection_async as users_collection,
+)
+from app.integrations.supabase.client import (
+    build_playlist_response,
+    download_to_bytes,
+    create_signed_url,
+)
 from app.core.dependencies import get_current_user
 
 public_router = APIRouter(prefix="/public", tags=["Public Library"])
 
 
 @public_router.get("/")
-def list_public_audios():
-    jobs = jobs_collection.find(
+async def list_public_audios():
+    cursor = jobs_collection.find(
         {"is_admin": True},
         {
             "_id": 0,
@@ -19,21 +26,37 @@ def list_public_audios():
             "required_credits": 1,
             "title": 1,
             "file_name": 1,
+            "author": 1,
+            "thumbnail_path": 1,
             "created_at": 1,
         },
     )
-    return list(jobs)
+
+    jobs = []
+    async for job in cursor:
+        if job.get("thumbnail_path"):
+            try:
+                # Generate signed URL valid for 24 hours for discovery
+                job["thumbnail_url"] = create_signed_url(
+                    job["thumbnail_path"], expires_in=86400
+                )
+            except Exception as e:
+                print(f"Failed to sign thumbnail: {e}")
+                job["thumbnail_url"] = None
+        jobs.append(job)
+
+    return jobs
 
 
 @public_router.get("/listen/{job_id}")
-def listen_public_audio(job_id: str, user=Depends(get_current_user)):
-    job = jobs_collection.find_one({"job_id": job_id, "is_admin": True})
+async def listen_public_audio(job_id: str, user=Depends(get_current_user)):
+    job = await jobs_collection.find_one({"job_id": job_id, "is_admin": True})
 
     if not job or "pages" not in job:
         raise HTTPException(404, "Audio not found")
 
     # ---- credit check ----
-    user_doc = users_collection.find_one({"_id": user["_id"]})
+    user_doc = await users_collection.find_one({"_id": user["_id"]})
     user_credits = user_doc.get("credits", 0)
     required = job.get("required_credits", 0)
 
@@ -43,10 +66,10 @@ def listen_public_audio(job_id: str, user=Depends(get_current_user)):
                 status_code=403,
                 detail=f"Not enough credits. Required: {required}, you have: {user_credits}",
             )
-        users_collection.update_one(
+        await users_collection.update_one(
             {"_id": user["_id"]}, {"$inc": {"credits": -required}}
         )
-        jobs_collection.update_one(
+        await jobs_collection.update_one(
             {"_id": job["_id"]}, {"$set": {"credits_charged": True}}
         )
 
@@ -54,10 +77,8 @@ def listen_public_audio(job_id: str, user=Depends(get_current_user)):
 
 
 @public_router.get("/download/{job_id}")
-def download_public_audio(job_id: str, token: str = Query(...)):
-    user = get_current_user(token)
-
-    job = jobs_collection.find_one({"job_id": job_id, "is_admin": True})
+async def download_public_audio(job_id: str, user=Depends(get_current_user)):
+    job = await jobs_collection.find_one({"job_id": job_id, "is_admin": True})
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -71,7 +92,7 @@ def download_public_audio(job_id: str, token: str = Query(...)):
     ordered_pages = sorted(pages.items(), key=page_sort_key)
 
     # ---- Credit check ----
-    user_doc = users_collection.find_one({"_id": user["_id"]})
+    user_doc = await users_collection.find_one({"_id": user["_id"]})
     user_credits = user_doc.get("credits", 0)
     required = job.get("required_credits", 0)
 
@@ -81,7 +102,9 @@ def download_public_audio(job_id: str, token: str = Query(...)):
             detail=f"Not enough credits. Required: {required}, you have: {user_credits}",
         )
 
-    users_collection.update_one({"_id": user["_id"]}, {"$inc": {"credits": -required}})
+    await users_collection.update_one(
+        {"_id": user["_id"]}, {"$inc": {"credits": -required}}
+    )
 
     # ---- Build final WAV ----
     pcm_chunks = []
@@ -123,8 +146,8 @@ def download_public_audio(job_id: str, token: str = Query(...)):
 
 
 @public_router.get("/sync/{job_id}")
-def get_sync(job_id: str):
-    job = jobs_collection.find_one({"job_id": job_id})
+async def get_sync(job_id: str):
+    job = await jobs_collection.find_one({"job_id": job_id})
     if not job or "pages" not in job:
         raise HTTPException(status_code=404, detail="Sync info not available")
 

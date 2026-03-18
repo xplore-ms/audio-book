@@ -10,3 +10,4 @@ accept_content = ["json"]
 timezone = "UTC"
 enable_utc = True
 result_expires = 3600
+broker_connection_retry_on_startup = True

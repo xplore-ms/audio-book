@@ -15,11 +15,12 @@ from fastapi import (
 from app.core.rate_limiter import rate_limit
 from app.core.dependencies import get_current_user
 from app.domain.credit.service import (
-    UPLOAD_COST,
+    get_upload_cost,
     add_credits,
     deduct_credits_atomic,
-    PAGE_COST,
+    get_page_cost,
 )
+from app.utils.config import get_plan_page_limit
 from app.integrations.supabase.client import delete_file, upload_bytes
 from app.utils.pdf import get_num_pages_and_extension
 from app.db.mongo import jobs_collection, job_tasks
@@ -29,13 +30,6 @@ from app.core.config import settings
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-PLAN_PAGE_LIMITS = {
-    "starter": 50,
-    "professional": 200,
-    "mastery": 5000,  # Effectively unlimited
-}
-
-DEFAULT_LIMIT = 5  # For users with no plan
 
 PLAN_QUICK_COOLDOWNS = {
     "starter": 7200,  # 2 hours
@@ -46,6 +40,12 @@ PLAN_QUICK_COOLDOWNS = {
 
 class UpdateJobRequest(BaseModel):
     title: str
+
+
+class ListeningProgressPayload(BaseModel):
+    page: int | None = None
+    time: float | None = None
+    completed: bool | None = None
 
 
 # -----------------------------
@@ -107,7 +107,7 @@ async def upload_pdf(
     if pages > settings.uploads.MAX_PAGES:
         raise HTTPException(400, "Page limit exceeded")
 
-    deduct_credits_atomic(user["_id"], UPLOAD_COST)
+    deduct_credits_atomic(user["_id"], get_upload_cost())
 
     try:
         mime_type = "application/pdf"
@@ -136,7 +136,7 @@ async def upload_pdf(
         )
 
     except Exception:
-        add_credits(user["_id"], UPLOAD_COST)
+        add_credits(user["_id"], get_upload_cost())
         raise
 
     return {
@@ -166,22 +166,46 @@ async def get_job(job_id: str, user=Depends(get_current_user)):
 
     processing_id = job.get("processing_id")
 
-    if not processing_id:
-        return {
-            "job_id": job["job_id"],
-            "pages": job["num_pages"],
-            "status": "done",
-            "title": job["title"],
-            "file_name": job["file_name"],
-            "created_at": job["created_at"],
-        }
+    progress = 100 if job.get("status") == "done" else 0
+    task_summary = None
+
+    if job.get("status") == "processing" and processing_id:
+        tasks = list(job_tasks.find({"job_id": job_id, "processing_id": processing_id}))
+        if tasks:
+            succ = sum(1 for t in tasks if t["state"] == "SUCCESS")
+            fail = sum(1 for t in tasks if t["state"] == "FAILED")
+            proc = sum(1 for t in tasks if t["state"] in ("PENDING", "PROGRESS"))
+
+            total_progress = sum(t.get("progress", 0) for t in tasks)
+            progress = round(total_progress / len(tasks))
+
+            task_summary = {
+                "completed": succ,
+                "failed": fail,
+                "processing": proc,
+                "total": len(tasks),
+            }
+
+    thumbnail_path = job.get("thumbnail_path")
+    from app.integrations.supabase.client import _safe_create_signed_url
+
+    thumbnail_url = (
+        _safe_create_signed_url(thumbnail_path, 86400) if thumbnail_path else None
+    )
+
     return {
         "job_id": job["job_id"],
         "pages": job["num_pages"],
         "status": job["status"],
+        "progress": progress,
+        "task_summary": task_summary,
         "title": job["title"],
         "file_name": job["file_name"],
         "created_at": job["created_at"],
+        "has_audio": len(job.get("pages", {})) > 0,
+        "pages_count": len(job.get("pages", {})),
+        "listen_progress": job.get("listen_progress", {}),
+        "thumbnail_url": thumbnail_url,
     }
 
 
@@ -236,7 +260,7 @@ async def reupload_pdf(
         )
 
     remote_pdf = job["remote_pdf_path"]
-    deduct_credits_atomic(user["_id"], UPLOAD_COST)
+    deduct_credits_atomic(user["_id"], get_upload_cost())
 
     try:
         mime_type = "application/pdf"
@@ -260,7 +284,7 @@ async def reupload_pdf(
             },
         )
     except Exception:
-        add_credits(user["_id"], UPLOAD_COST)
+        add_credits(user["_id"], get_upload_cost())
         raise
 
     # 5. Update job metadata
@@ -286,6 +310,172 @@ async def update_job(
         raise HTTPException(404, "Job not found")
 
     return {"message": "Job updated successfully"}
+
+
+class ChatPayload(BaseModel):
+    message: str
+    history: list[dict] = []
+
+
+@router.get("/job/{job_id}/summary")
+async def get_job_summary(job_id: str, user=Depends(get_current_user)):
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    if job.get("summary"):
+        # Check if audio generation is needed and queue it
+        if "summary_audio_status" not in job:
+            celery.send_task("tasks.generate_summary_audio_task", args=[job_id])
+            jobs_collection.update_one(
+                {"job_id": job_id}, {"$set": {"summary_audio_status": "processing"}}
+            )
+
+        audio_url = job.get("summary_audio_url")
+        if not audio_url and job.get("summary_audio_path"):
+            from app.integrations.supabase.client import _safe_create_signed_url
+
+            audio_url = _safe_create_signed_url(job.get("summary_audio_path"), 3600)
+
+        return {
+            "summary": job["summary"],
+            "audio_url": audio_url,
+            "audio_status": job.get("summary_audio_status", "pending"),
+        }
+
+    from app.integrations.supabase.client import download_to_bytes
+    from app.utils.pdf import extract_text_from_bytes
+    from app.utils.llm import generate_summary
+
+    remote_path = job.get("remote_pdf_path")
+    if not remote_path:
+        raise HTTPException(404, "PDF file not found")
+
+    try:
+        file_bytes = download_to_bytes(remote_path)
+        text = extract_text_from_bytes(file_bytes, job.get("extension", ".pdf"))
+
+        if not text.strip():
+            raise ValueError("No extractable text found in the document")
+
+        summary = generate_summary(text)
+
+        # Dispatch TTS for summary
+        celery.send_task("tasks.generate_summary_audio_task", args=[job_id])
+
+        jobs_collection.update_one(
+            {"job_id": job_id},
+            {"$set": {"summary": summary, "summary_audio_status": "processing"}},
+        )
+        return {"summary": summary, "audio_status": "processing"}
+    except Exception as e:
+        raise HTTPException(500, f"Error generating summary: {str(e)}")
+
+
+@router.post("/job/{job_id}/chat")
+async def chat_with_job(
+    job_id: str, payload: ChatPayload, user=Depends(get_current_user)
+):
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    # We will use the summary as context for the chat if available. We can also fetch the full text,
+    # but the full text is not stored in MongoDB and fetching/extracting each time might be too slow.
+    # The summary from get_job_summary is an ideal size.
+    if not job.get("summary"):
+        raise HTTPException(
+            400,
+            "Summary not yet generated. Please generate the summary first to use chat.",
+        )
+
+    from app.utils.llm import chat_with_document
+
+    try:
+        reply = chat_with_document(job["summary"], payload.message, payload.history)
+        return {"reply": reply}
+    except Exception as e:
+        raise HTTPException(500, f"Chat error: {str(e)}")
+
+
+@router.post("/job/{job_id}/listening-progress")
+async def update_listening_progress(
+    job_id: str, payload: ListeningProgressPayload, user=Depends(get_current_user)
+):
+    update_data: dict = {}
+    if payload.page is not None:
+        update_data["listen_progress.page"] = payload.page
+    if payload.time is not None:
+        update_data["listen_progress.time"] = payload.time
+    if payload.completed is not None:
+        update_data["listen_progress.completed"] = payload.completed
+
+    if not update_data:
+        raise HTTPException(400, "No progress data provided")
+
+    result = jobs_collection.update_one(
+        {"job_id": job_id, "user_id": str(user["_id"])}, {"$set": update_data}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(404, "Job not found")
+
+    return {"message": "Progress updated successfully"}
+
+
+@router.post("/job/{job_id}/start-summary")
+def start_summary_job(
+    job_id: str,
+    voice_id: str | None = None,
+    user=Depends(get_current_user),
+):
+    rate_limit(key=f"summary_start:{user['_id']}", limit=5, window_seconds=3600)
+
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    # Resolve Voice
+    voice_name = "en-US-Chirp3-HD-Zephyr"
+    if voice_id:
+        try:
+            from app.db.mongo import voices_collection
+            from bson.objectid import ObjectId
+
+            v_doc = voices_collection.find_one({"_id": ObjectId(voice_id)})
+            if v_doc and "voice_name" in v_doc:
+                voice_name = v_doc["voice_name"]
+        except Exception:
+            pass
+
+    # Flat cost for summary
+    SUMMARY_COST = 5
+    if user["credits"] < SUMMARY_COST:
+        raise HTTPException(
+            400, "Insufficient credits for summary (5 credits required)"
+        )
+
+    deduct_credits_atomic(user["_id"], SUMMARY_COST)
+
+    try:
+        jobs_collection.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "status": "processing",
+                    "mode": "summary",
+                    "summary_audio_status": "pending",
+                    "started_at": datetime.utcnow(),
+                    "voice_name": voice_name,
+                }
+            },
+        )
+        celery.send_task("tasks.process_summary", args=[job_id, voice_name])
+    except Exception:
+        add_credits(user["_id"], SUMMARY_COST)
+        raise
+
+    return {"status": "processing", "job_id": job_id}
 
 
 @router.post("/start")
@@ -333,7 +523,7 @@ def start_job(
             "Quick processing is limited to 4 pages per run. For full document processing, please use the 'Full Document' mode.",
         )
 
-    total_cost = PAGE_COST * pages
+    total_cost = get_page_cost() * pages
     deduct_credits_atomic(user["_id"], total_cost)
     processing_id = str(uuid.uuid4())
     # Mark job as processing (job-level only)
@@ -377,13 +567,28 @@ def start_job(
 
 
 @router.post("/request-full-review")
-def request_full_review(job_id: str, user=Depends(get_current_user)):
+def request_full_review(
+    job_id: str, voice_id: str = Query(None), user=Depends(get_current_user)
+):
     job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
     if not job:
         raise HTTPException(404, "Job not found")
 
     if job.get("review_required"):
         raise HTTPException(400, "Review already requested")
+
+    # Resolve Voice
+    voice_name = job.get("voice_name") or "en-US-AriaNeural"  # Edge fallback
+    if voice_id:
+        try:
+            from app.db.mongo import voices_collection
+            from bson.objectid import ObjectId
+
+            v_doc = voices_collection.find_one({"_id": ObjectId(voice_id)})
+            if v_doc and "voice_name" in v_doc:
+                voice_name = v_doc["voice_name"]
+        except Exception:
+            pass
 
     # Enforce Plan Limits
     plan_id = user.get("active_plan_id")
@@ -393,7 +598,7 @@ def request_full_review(job_id: str, user=Depends(get_current_user)):
             "Full document processing is a premium feature. Please subscribe to a plan to use this.",
         )
 
-    limit = PLAN_PAGE_LIMITS.get(plan_id, DEFAULT_LIMIT)
+    limit = get_plan_page_limit(plan_id)
 
     if job["num_pages"] > limit:
         raise HTTPException(
@@ -402,19 +607,30 @@ def request_full_review(job_id: str, user=Depends(get_current_user)):
             f"This document has {job['num_pages']} pages. Please upgrade to a higher plan.",
         )
 
-    jobs_collection.update_one(
-        {"job_id": job_id},
-        {
-            "$set": {
-                "review_required": True,
-                "review_status": "pending",
-                "requested_at": datetime.utcnow(),
-            }
-        },
-    )
+    try:
+        jobs_collection.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "review_required": True,
+                    "review_status": "pending",
+                    "requested_at": datetime.utcnow(),
+                    "voice_name": voice_name,
+                }
+            },
+        )
 
-    # 🔥 SEND EMAIL ASYNC (NO BLOCKING)
-    celery.send_task("tasks.send_review_request_email", args=[job_id])
+        # 🔥 SEND EMAIL ASYNC (NO BLOCKING)
+        celery.send_task("tasks.send_review_request_email", args=[job_id])
+    except Exception as e:
+        # If task dispatch fails, we might want to log it and potentially revert DB state
+        # but since the user might try again, let's at least raise a proper error.
+        print(f"Failed to queue review request email: {e}")
+        # Not raising here because the job is already marked for review, which is the primary state.
+        # But maybe we should raise so the user knows it failed?
+        # Actually, if the DB update succeeded but email failed, the job IS queued, just admin not notified yet.
+        # It's better to keep it marked and maybe retry email later or just log it.
+        pass
 
     return {"status": "queued_for_review", "job_id": job_id}
 

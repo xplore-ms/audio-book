@@ -7,7 +7,6 @@ import logging
 from celery import Celery
 
 from app.domain.user.repository import UserRepository
-from app.domain.user.schemas import UserInDB, UserCreate
 from jose import jwt
 from app.core.security import (
     hash_password,
@@ -19,6 +18,9 @@ from app.core.security import (
     JWT_ALGO,
 )
 from app.db import mongo
+from app.utils.config import get_app_config
+
+from app.domain.user.schemas import UserInDB, UserCreate, UserUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,7 @@ class UserService:
             )
 
         user_db = UserInDB(
+            username=user_in.username or user_in.email.split("@")[0],
             email=user_in.email,
             password_hash=hash_password(user_in.password),
             credits=credit,
@@ -152,11 +155,17 @@ class UserService:
         }
         await self.repo.update_by_id(user["_id"], update)
 
+        config = get_app_config()
+        config = get_app_config()
         return {
+            "id": str(user["_id"]),
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
+            "username": user.get("username") or email.split("@")[0],
             "credits": user.get("credits", 0),
+            "upload_cost": config.get("upload_cost", 10),
+            "page_cost": config.get("page_cost", 1),
         }
 
     async def forgot_password(self, email: str):
@@ -216,11 +225,15 @@ class UserService:
             {"user_id": user["_id"], "status": "active"}
         )
 
-        # Do not expose sensitive fields
+        config = get_app_config()
         return {
+            "id": str(user["_id"]),
+            "username": user.get("username") or user["email"].split("@")[0],
             "email": user["email"],
             "credits": user.get("credits", 0),
             "active_plan_id": user.get("active_plan_id"),
+            "upload_cost": config.get("upload_cost", 10),
+            "page_cost": config.get("page_cost", 1),
             "subscription": {
                 "plan_id": sub.get("plan_id"),
                 "expires_at": sub.get("expires_at"),
@@ -230,6 +243,38 @@ class UserService:
             if sub
             else None,
         }
+
+    async def update_user(self, user_id: str, updates: UserUpdate):
+        update_data = updates.model_dump(exclude_unset=True)
+        if not update_data:
+            return {"message": "No updates provided"}
+
+        if "password" in update_data:
+            if not _is_strong_password(update_data["password"]):
+                raise ValueError("Password does not meet complexity requirements")
+            update_data["password_hash"] = hash_password(update_data["password"])
+            del update_data["password"]
+
+        if "username" in update_data:
+            # Check if username is already in use
+            existing = await self.repo.find_by_filter(
+                {"username": update_data["username"]}
+            )
+            if existing and str(existing["_id"]) != str(user_id):
+                raise ValueError("Username already in use")
+
+        await self.repo.update_by_id(user_id, {"$set": update_data})
+
+        # Return updated user info
+        user_in_db = await self.repo.find_by_filter({"_id": user_id})
+        if not user_in_db:
+            # Fallback: maybe id was passed as string email elsewhere
+            user_in_db = await self.repo.find_by_email(str(user_id))
+
+        if not user_in_db:
+            return {"message": "Profile updated successfully"}
+
+        return await self.get_me(user_in_db)
 
     async def refresh_user_token(self, refresh_token: str):
         try:

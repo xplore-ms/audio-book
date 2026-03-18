@@ -15,7 +15,11 @@ from pydantic import BaseModel, EmailStr
 from typing import List
 from datetime import datetime
 
-from app.db.mongo import jobs_collection, users_collection
+from app.db.mongo import (
+    jobs_collection_async as jobs_collection,
+    users_collection_async as users_collection,
+    job_tasks_async as job_tasks,
+)
 from app.core import config
 
 router = APIRouter(prefix="/audio", tags=["Audio"])
@@ -29,7 +33,7 @@ class ShareWithEmailsPayload(BaseModel):
 
 
 @router.get("/my")
-def my_audios(user=Depends(get_current_user)):
+async def my_audios(user=Depends(get_current_user)):
     """
     Fetch all completed audios for the authenticated user (owned + shared)
     """
@@ -46,13 +50,43 @@ def my_audios(user=Depends(get_current_user)):
             "file_name": 1,
             "created_at": 1,
             "user_id": 1,
+            "status": 1,
+            "review_status": 1,
+            "voice_name": 1,
+            "pages": 1,
+            "thumbnail_path": 1,
         },
     ).sort("created_at", -1)
 
     results = []
-    for job in jobs_cursor:
-        # Determine if current user is the owner
+    async for job in jobs_cursor:
         is_owner = job.get("user_id") == user_id
+        status = job.get("status", "uploaded")
+
+        progress = 100 if status == "done" else 0
+        task_summary = None
+
+        if status == "processing":
+            # Fetch task stats
+            tasks = await job_tasks.find(
+                {"job_id": job["job_id"], "processing_id": job.get("processing_id")}
+            ).to_list(length=1000)
+
+            if tasks:
+                succ = sum(1 for t in tasks if t["state"] == "SUCCESS")
+                fail = sum(1 for t in tasks if t["state"] == "FAILED")
+                proc = sum(1 for t in tasks if t["state"] in ("PENDING", "PROGRESS"))
+
+                # Calculate simple progress percent
+                total_progress = sum(t.get("progress", 0) for t in tasks)
+                progress = round(total_progress / len(tasks))
+
+                task_summary = {
+                    "completed": succ,
+                    "failed": fail,
+                    "processing": proc,
+                    "total": len(tasks),
+                }
 
         results.append(
             {
@@ -60,7 +94,18 @@ def my_audios(user=Depends(get_current_user)):
                 "title": job.get("title"),
                 "file_name": job.get("file_name"),
                 "created_at": job.get("created_at"),
+                "status": status,
+                "progress": progress,
+                "task_summary": task_summary,
+                "review_status": job.get("review_status"),
+                "voice_name": job.get("voice_name"),
                 "is_owner": is_owner,
+                "has_audio": len(job.get("pages", {})) > 0,
+                "pages_count": len(job.get("pages", {})),
+                "thumbnail_path": job.get("thumbnail_path"),
+                "thumbnail_url": _safe_create_signed_url(job["thumbnail_path"], 86400)
+                if job.get("thumbnail_path")
+                else None,
             }
         )
 
@@ -68,11 +113,13 @@ def my_audios(user=Depends(get_current_user)):
 
 
 @router.get("/sync/{job_id}")
-def get_sync(job_id: str, user=Depends(get_current_user)):
+async def get_sync(job_id: str, user=Depends(get_current_user)):
     """
     Return per-page sync info for the frontend to build dynamic global sync.
     """
-    job = jobs_collection.find_one({"job_id": job_id, "user_id": str(user["_id"])})
+    job = await jobs_collection.find_one(
+        {"job_id": job_id, "user_id": str(user["_id"])}
+    )
     if not job or "pages" not in job:
         raise HTTPException(status_code=404, detail="Sync info not available")
 
@@ -80,7 +127,7 @@ def get_sync(job_id: str, user=Depends(get_current_user)):
 
 
 @router.get("/pages/{job_id}")
-def get_pages(
+async def get_pages(
     job_id: str,
     request: Request,
     skip: int = 0,
@@ -88,11 +135,13 @@ def get_pages(
     user=Depends(get_current_user),
     token: str = Depends(oauth2_scheme),
 ):
-    job = jobs_collection.find_one({"job_id": job_id})
+    actual_token = token or request.cookies.get("access_token")
+
+    job = await jobs_collection.find_one({"job_id": job_id})
     if not job or "pages" not in job:
         raise HTTPException(404, "Pages not found")
 
-    if job["user_id"] != str(user["_id"]):
+    if job["user_id"] != str(user["_id"]) and user.get("role") != "admin":
         if job.get("shared") is not True:
             raise HTTPException(403, "Access denied")
 
@@ -114,7 +163,7 @@ def get_pages(
 
     playlist = []
     now = int(time.time())
-    expires_at = now + 900  # 5 minutes TTL for signed URLs
+    expires_at = now + 3600  # 1 hour TTL for signed URLs
 
     for key in paged_keys:
         page = pages[key]
@@ -141,10 +190,10 @@ def get_pages(
             ):
                 base_url = base_url.replace("http://", "https://", 1)
 
-            audio_url = f"{base_url}/api/v1/audio/hls/{job_id}/{key}/playlist.m3u8?token={token}"
+            audio_url = f"{base_url}/api/v1/audio/hls/{job_id}/{key}/playlist.m3u8?token={actual_token}"
         else:
             # Fallback for legacy single file
-            audio_url = _safe_create_signed_url(final_path, 900)
+            audio_url = _safe_create_signed_url(final_path, 3600)
 
         download_url = None
         # Only create download link for single file audio
@@ -154,7 +203,7 @@ def get_pages(
             )
 
         sync_url = (
-            _safe_create_signed_url(page["sync_path"], 900)
+            _safe_create_signed_url(page["sync_path"], 3600)
             if page.get("sync_path")
             else None
         )
@@ -177,17 +226,20 @@ def get_pages(
         "total_pages": len(ordered_keys),
         "skip": skip,
         "limit": limit,
+        "thumbnail_url": _safe_create_signed_url(job.get("thumbnail_path"), 86400)
+        if job.get("thumbnail_path")
+        else None,
     }
 
 
 @router.post("/share/{job_id}/emails")
-def share_audiobook_with_emails(
+async def share_audiobook_with_emails(
     job_id: str, payload: ShareWithEmailsPayload, user=Depends(get_current_user)
 ):
     # Verify valid emails
     emails_to_check = [email.lower() for email in payload.emails]
     existing_users = users_collection.find({"email": {"$in": emails_to_check}})
-    existing_emails = {u["email"] for u in existing_users}
+    existing_emails = {u["email"] async for u in existing_users}
 
     missing_emails = set(emails_to_check) - existing_emails
     if missing_emails:
@@ -196,7 +248,7 @@ def share_audiobook_with_emails(
             detail=f"The following emails are not registered: {', '.join(missing_emails)}",
         )
 
-    result = jobs_collection.update_one(
+    result = await jobs_collection.update_one(
         {"job_id": job_id, "user_id": str(user["_id"])},
         {
             "$set": {"shared": True},
@@ -221,8 +273,8 @@ def share_audiobook_with_emails(
 
 
 @router.get("/unshare/{job_id}")
-def unshare_audiobook(job_id: str, user=Depends(get_current_user)):
-    result = jobs_collection.update_one(
+async def unshare_audiobook(job_id: str, user=Depends(get_current_user)):
+    result = await jobs_collection.update_one(
         {"job_id": job_id, "user_id": str(user["_id"])}, {"$set": {"shared": False}}
     )
     if result.matched_count == 0:
@@ -232,7 +284,7 @@ def unshare_audiobook(job_id: str, user=Depends(get_current_user)):
 
 
 @router.get("/hls/{job_id}/{page_key}/playlist.m3u8")
-def get_hls_playlist(
+async def get_hls_playlist(
     job_id: str,
     page_key: str,
     token: str = Query(...),
@@ -241,12 +293,12 @@ def get_hls_playlist(
     """
     Serve HLS playlist with signed segment URLs.
     """
-    job = jobs_collection.find_one({"job_id": job_id})
+    job = await jobs_collection.find_one({"job_id": job_id})
     if not job:
         raise HTTPException(404, "Job not found")
 
     # Check access (same logic as get_pages)
-    if job["user_id"] != str(user["_id"]):
+    if job["user_id"] != str(user["_id"]) and user.get("role") != "admin":
         if job.get("shared") is not True:
             raise HTTPException(403, "Access denied")
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Request
 from app.db.mongo import (
     jobs_collection,
     users_collection,
@@ -6,16 +6,23 @@ from app.db.mongo import (
     job_tasks,
     activities_collection,
     subscriptions_collection,
+    app_settings,
 )
 from app.utils.activity import log_activity
+from pydantic import BaseModel, Field
 
-from app.integrations.supabase.client import upload_bytes
+from app.integrations.supabase.client import (
+    upload_bytes,
+    _safe_create_signed_url,
+    _safe_create_download_url,
+)
 from app.core.security import hash_password, verify_password, create_access_token
 from app.utils.pdf import get_num_pages_and_extension
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, oauth2_scheme
 from celery import Celery
 from datetime import datetime, timedelta
 import uuid
+import time
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -201,7 +208,13 @@ def start_job(
     for page in range(start, end + 1):
         res = celery.send_task(
             "tasks.process_admin_page",
-            args=[job_id, job["remote_pdf_path"], page, processing_id],
+            args=[
+                job_id,
+                job["remote_pdf_path"],
+                page,
+                processing_id,
+                job.get("voice_name", "en-US-AriaNeural"),
+            ],
         )
         task_ids.append(res.id)
 
@@ -416,10 +429,11 @@ def start_admin_request_job(
     )
 
     task_ids = []
+    voice_name = job.get("voice_name", "en-US-AriaNeural")
     for page in range(start, end + 1):
         task = celery.send_task(
             "tasks.process_page",
-            args=[job_id, processing_id, job["remote_pdf_path"], page],
+            args=[job_id, processing_id, job["remote_pdf_path"], page, voice_name],
         )
         task_ids.append(task.id)
 
@@ -603,6 +617,39 @@ def done_processing(job_id: str = Form(...), user=Depends(get_current_user)):
     return {"status": "done", "job_id": job_id}
 
 
+@router.post("/revert-review", tags=[ADMIN_TAG, REVIEW_TAG])
+def revert_review(job_id: str = Form(...), user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    job = jobs_collection.find_one({"job_id": job_id, "review_status": "done"})
+    if not job:
+        raise HTTPException(
+            status_code=404, detail="Job not found or not in 'done' status"
+        )
+
+    jobs_collection.update_one(
+        {"job_id": job_id},
+        {
+            "$set": {
+                "review_status": "approved",
+                "reverted_at": datetime.utcnow(),
+                "reverted_by": user["_id"],
+            }
+        },
+    )
+
+    log_activity(
+        user_id=str(user["_id"]),
+        activity_type="review_reverted",
+        description=f"Admin reverted job {job_id} from done to approved",
+        is_admin_action=True,
+        metadata={"job_id": job_id},
+    )
+
+    return {"status": "approved", "job_id": job_id}
+
+
 @router.post("/decline-review", tags=[ADMIN_TAG, PROCESSING_TAG, EMAIL_TAG])
 def decline_review(
     job_id: str = Form(...),
@@ -671,18 +718,34 @@ def my_library(user=Depends(get_current_user)):
 
 
 @router.get("/reviews")
-def list_review_requests(user=Depends(get_current_user)):
+def list_review_requests(
+    search: str | None = None,
+    status: str | None = None,
+    page: int = 1,
+    limit: int = 10,
+    user=Depends(get_current_user),
+):
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
+    match_stage = {
+        "review_required": True,
+        "is_admin": {"$ne": True},
+    }
+
+    if status and status != "all":
+        match_stage["review_status"] = status
+    else:
+        match_stage["review_status"] = {"$in": ["pending", "approved", "done"]}
+
+    if search:
+        match_stage["$or"] = [
+            {"title": {"$regex": search, "$options": "i"}},
+            {"job_id": {"$regex": search, "$options": "i"}},
+        ]
+
     pipeline = [
-        {
-            "$match": {
-                "review_required": True,
-                "review_status": {"$in": ["pending", "approved", "done"]},
-                "is_admin": {"$ne": True},
-            }
-        },
+        {"$match": match_stage},
         {"$addFields": {"user_id_obj": {"$toObjectId": "$user_id"}}},
         {
             "$lookup": {
@@ -693,21 +756,57 @@ def list_review_requests(user=Depends(get_current_user)):
             }
         },
         {"$unwind": "$user"},
-        {
-            "$project": {
-                "_id": 0,
-                "job_id": 1,
-                "num_pages": 1,
-                "requested_at": 1,
-                "review_status": 1,
-                "user_email": "$user.email",
-                "user_credits": "$user.credits",
-            }
-        },
-        {"$sort": {"requested_at": -1}},
     ]
 
-    return list(jobs_collection.aggregate(pipeline))
+    # If search is email, we might need to filter after lookup or add user email to match
+    # Let's add email search to match stage using a separate filter if needed,
+    # but for now let's keep it simple or use a joined filter.
+    if search:
+        pipeline.append(
+            {
+                "$match": {
+                    "$or": [
+                        {"title": {"$regex": search, "$options": "i"}},
+                        {"job_id": {"$regex": search, "$options": "i"}},
+                        {"user.email": {"$regex": search, "$options": "i"}},
+                    ]
+                }
+            }
+        )
+
+    # Calculate total for pagination
+    count_pipeline = pipeline + [{"$count": "total"}]
+    total_res = list(jobs_collection.aggregate(count_pipeline))
+    total = total_res[0]["total"] if total_res else 0
+
+    pipeline.extend(
+        [
+            {
+                "$project": {
+                    "_id": 0,
+                    "job_id": 1,
+                    "title": 1,
+                    "num_pages": 1,
+                    "requested_at": 1,
+                    "review_status": 1,
+                    "user_id": 1,
+                    "voice_name": 1,
+                    "user_email": "$user.email",
+                    "user_credits": "$user.credits",
+                }
+            },
+            {"$sort": {"requested_at": -1}},
+            {"$skip": (page - 1) * limit},
+            {"$limit": limit},
+        ]
+    )
+
+    return {
+        "reviews": list(jobs_collection.aggregate(pipeline)),
+        "total": total,
+        "page": page,
+        "pages": (total + limit - 1) // limit,
+    }
 
 
 @router.get("/users")
@@ -987,3 +1086,235 @@ def admin_login(email: str = Form(...), password: str = Form(...)):
     token = create_access_token(email)
 
     return {"access_token": token, "token_type": "bearer", "role": "admin"}
+
+
+@router.get("/users/{user_id}/audios")
+def list_user_audios(user_id: str, user=Depends(get_current_user)):
+    """
+    List all audios/jobs for a specific user. Admin only.
+    """
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    jobs_cursor = jobs_collection.find(
+        {"user_id": user_id},
+        {
+            "_id": 0,
+            "job_id": 1,
+            "title": 1,
+            "file_name": 1,
+            "created_at": 1,
+            "status": 1,
+            "num_pages": 1,
+        },
+    ).sort("created_at", -1)
+
+    return list(jobs_cursor)
+
+
+@router.get("/users/{user_id}/audios/{job_id}/pages")
+def get_user_audio_pages(
+    user_id: str,
+    job_id: str,
+    request: Request,
+    skip: int = 0,
+    limit: int = 5,
+    user=Depends(get_current_user),
+    token: str = Depends(oauth2_scheme),
+):
+    """
+    Get signed URLs for a user's audiobook pages. Admin only.
+    """
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    job = jobs_collection.find_one({"job_id": job_id, "user_id": user_id})
+    if not job or "pages" not in job:
+        raise HTTPException(404, "Pages not found for this user job")
+
+    pages = job.get("pages", {})
+    # Sort keys
+    try:
+        ordered_keys = sorted(pages.keys(), key=lambda k: int(k.split("_")[-1]))
+    except (ValueError, IndexError):
+        ordered_keys = sorted(pages.keys())
+
+    # Paginate
+    paged_keys = ordered_keys[skip : skip + limit]
+
+    playlist = []
+    now = int(time.time())
+    expires_at = now + 900  # 15 minutes TTL
+
+    for key in paged_keys:
+        page = pages[key]
+        audio_path = page.get("audio_path")
+        hls_path = page.get("hls_path")
+        final_path = audio_path or hls_path
+
+        if not final_path:
+            continue
+
+        if audio_path:
+            audio_url = _safe_create_signed_url(audio_path, 900)
+        elif hls_path:
+            base_url = str(request.base_url).rstrip("/")
+            if (
+                "localhost" not in base_url
+                and "127.0.0.1" not in base_url
+                and base_url.startswith("http://")
+            ):
+                base_url = base_url.replace("http://", "https://", 1)
+            audio_url = f"{base_url}/api/v1/audio/hls/{job_id}/{key}/playlist.m3u8?token={token}"
+        else:
+            continue
+
+        download_url = None
+        if audio_path:
+            download_url = _safe_create_download_url(
+                audio_path, 900, filename=f"{job.get('title', 'audio')}_{key}.mp3"
+            )
+
+        sync_url = (
+            _safe_create_signed_url(page["sync_path"], 900)
+            if page.get("sync_path")
+            else None
+        )
+
+        playlist.append(
+            {
+                "page": key,
+                "audio_url": audio_url,
+                "download_url": download_url,
+                "sync_url": sync_url,
+                "duration": page.get("duration", 0),
+                "expires_at": expires_at,
+            }
+        )
+
+    return {
+        "job_id": job.get("job_id"),
+        "title": job.get("title"),
+        "pages": playlist,
+        "total_pages": len(ordered_keys),
+        "skip": skip,
+        "limit": limit,
+    }
+
+
+# -------------------------
+# ADMIN: Settings & Plans
+# -------------------------
+
+
+class GlobalConfigUpdate(BaseModel):
+    upload_cost: int | None = Field(default=None, ge=0)
+    page_cost: int | None = Field(default=None, ge=0)
+    default_limit: int | None = Field(default=None, ge=0)
+    base_price_kobo: int | None = Field(default=None, ge=0)
+
+
+class PlanUpdate(BaseModel):
+    credits: int = Field(ge=0)
+    price_ngn: int = Field(ge=0)
+    page_limit: int = Field(ge=0)
+
+
+@router.get("/config", tags=[ADMIN_TAG])
+def get_global_config(user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    config = app_settings.find_one({"type": "global_config"})
+    if not config:
+        # Defaults based on current hardcoded values
+        return {
+            "upload_cost": 10,
+            "page_cost": 1,
+            "default_limit": 5,
+            "base_price_kobo": 5000,
+        }
+    config.pop("_id", None)
+    config.pop("type", None)
+    return config
+
+
+@router.patch("/config", tags=[ADMIN_TAG])
+def update_global_config(payload: GlobalConfigUpdate, user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    update_data = {k: v for k, v in payload.dict().items() if v is not None}
+    if not update_data:
+        return {"message": "No changes"}
+
+    app_settings.update_one(
+        {"type": "global_config"}, {"$set": update_data}, upsert=True
+    )
+
+    log_activity(
+        user_id=str(user["_id"]),
+        activity_type="update_config",
+        description="Admin updated global system configuration",
+        is_admin_action=True,
+        metadata=update_data,
+    )
+
+    return {"message": "Config updated", "updated": update_data}
+
+
+@router.get("/plans", tags=[ADMIN_TAG])
+def get_plans(user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    plans_cursor = app_settings.find({"type": "plan"})
+    plans = list(plans_cursor)
+
+    if not plans:
+        # Defaults based on current hardcoded values
+        return [
+            {"plan_id": "starter", "credits": 50, "price_ngn": 1000, "page_limit": 50},
+            {
+                "plan_id": "professional",
+                "credits": 120,
+                "price_ngn": 2000,
+                "page_limit": 200,
+            },
+            {
+                "plan_id": "mastery",
+                "credits": 500,
+                "price_ngn": 5000,
+                "page_limit": 5000,
+            },
+        ]
+
+    for p in plans:
+        p.pop("_id", None)
+        p.pop("type", None)
+
+    return plans
+
+
+@router.put("/plans/{plan_id}", tags=[ADMIN_TAG])
+def update_plan(plan_id: str, payload: PlanUpdate, user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    plan_data = payload.dict()
+    plan_data["plan_id"] = plan_id
+    plan_data["type"] = "plan"
+
+    app_settings.update_one(
+        {"type": "plan", "plan_id": plan_id}, {"$set": plan_data}, upsert=True
+    )
+
+    log_activity(
+        user_id=str(user["_id"]),
+        activity_type="update_plan",
+        description=f"Admin updated plan: {plan_id}",
+        is_admin_action=True,
+        metadata=plan_data,
+    )
+
+    return {"message": f"Plan {plan_id} updated", "plan": plan_data}
