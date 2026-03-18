@@ -38,3 +38,23 @@ def get_num_pages_and_extension(
             return doc.page_count, ".txt", txt_bytes
     else:
         raise ValueError(f"Unsupported file extension: {ext}")
+
+
+def extract_text_from_bytes(file_bytes: bytes, extension: str) -> str:
+    """
+    Extracts all text from a given file byte stream.
+    Expected extension examples: '.pdf', '.epub', '.txt', '.docx'
+    """
+    ext = extension.lower().strip(".")
+    if ext == "docx":
+        import docx
+        import io
+
+        doc_obj = docx.Document(io.BytesIO(file_bytes))
+        return "\n".join([p.text for p in doc_obj.paragraphs])
+
+    with fitz.open(stream=file_bytes, filetype=ext) as doc:
+        text = ""
+        for page in doc:
+            text += page.get_text()
+        return text

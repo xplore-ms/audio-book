@@ -24,7 +24,11 @@ def test_register(mock_default_svc, client):
 def test_login(mock_default_svc, client):
     mock_svc = mock_default_svc.return_value
     mock_svc.login_user = AsyncMock(
-        return_value={"access_token": "token", "token_type": "bearer"}
+        return_value={
+            "access_token": "token",
+            "refresh_token": "refresh",
+            "token_type": "bearer",
+        }
     )
 
     response = client.post(
@@ -93,7 +97,11 @@ def test_reset_password(mock_default_svc, client):
 def test_refresh_token(mock_default_svc, client):
     mock_svc = mock_default_svc.return_value
     mock_svc.refresh_user_token = AsyncMock(
-        return_value={"access_token": "new_token", "token_type": "bearer"}
+        return_value={
+            "access_token": "new_token",
+            "refresh_token": "new_refresh",
+            "token_type": "bearer",
+        }
     )
 
     response = client.post(

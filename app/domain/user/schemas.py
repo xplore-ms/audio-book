@@ -4,6 +4,7 @@ from typing import Optional
 
 
 class UserCreate(BaseModel):
+    username: Optional[str] = None
     email: EmailStr
     password: str
     device_fingerprint_hash: str
@@ -12,13 +13,23 @@ class UserCreate(BaseModel):
 
 
 class UserPublic(BaseModel):
+    username: Optional[str] = None
     email: EmailStr
     credits: int = 0
 
     model_config = {"extra": "forbid"}
 
 
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    password: Optional[str] = None
+    # Add other fields here as needed in the future
+
+    model_config = {"extra": "forbid"}
+
+
 class UserInDB(BaseModel):
+    username: Optional[str] = None
     email: EmailStr
     password_hash: str
     credits: int = 0

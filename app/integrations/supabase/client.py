@@ -70,7 +70,7 @@ def _safe_create_signed_url(path: str, ttl: int) -> Optional[str]:
             return None
 
 
-def build_playlist_response(job: dict, signed_url_ttl: int = 300):
+def build_playlist_response(job: dict, signed_url_ttl: int = 3600):
     pages = job.get("pages", {})
 
     def page_sort_key(k: str) -> int:

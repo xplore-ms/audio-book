@@ -31,6 +31,7 @@ payments_collection = sync_db["payments"]
 voices_collection = sync_db["voices"]
 subscriptions_collection = sync_db["subscriptions"]
 activities_collection = sync_db["activities"]
+app_settings = sync_db["app_settings"]
 
 
 # Backwards-compatible aliases
@@ -50,6 +51,7 @@ payments_collection_async = async_db["payments"]
 voices_collection_async = async_db["voices"]
 subscriptions_collection_async = async_db["subscriptions"]
 activities_collection_async = async_db["activities"]
+app_settings_async = async_db["app_settings"]
 
 
 def ensure_indexes():

@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 
 @patch("app.api.v1.audio.jobs_collection")
@@ -10,6 +10,8 @@ def test_my_audios(mock_jobs, client):
             "file_name": "f1.pdf",
             "created_at": "2024-01-01",
             "user_id": "user_id_123",
+            "status": "done",
+            "pages": {},
         },
         {
             "job_id": "job2",
@@ -17,9 +19,12 @@ def test_my_audios(mock_jobs, client):
             "file_name": "f2.pdf",
             "created_at": "2024-01-02",
             "user_id": "other_user",
+            "status": "done",
+            "pages": {},
         },
     ]
-    mock_jobs.find.return_value.sort.return_value = mock_cursor
+    mock_jobs.find.return_value.sort.return_value = AsyncMock()
+    mock_jobs.find.return_value.sort.return_value.__aiter__.return_value = mock_cursor
 
     response = client.get("/api/v1/audio/my")
     assert response.status_code == 200
@@ -31,11 +36,13 @@ def test_my_audios(mock_jobs, client):
 
 @patch("app.api.v1.audio.jobs_collection")
 def test_get_sync(mock_jobs, client):
-    mock_jobs.find_one.return_value = {
-        "job_id": "job1",
-        "user_id": "user_id_123",
-        "pages": {"1": {"sync_path": "test"}},
-    }
+    mock_jobs.find_one = AsyncMock(
+        return_value={
+            "job_id": "job1",
+            "user_id": "user_id_123",
+            "pages": {"1": {"sync_path": "test"}},
+        }
+    )
 
     response = client.get("/api/v1/audio/sync/job1")
     assert response.status_code == 200
@@ -45,15 +52,15 @@ def test_get_sync(mock_jobs, client):
 @patch("app.api.v1.audio.jobs_collection")
 @patch("app.api.v1.audio._safe_create_signed_url")
 def test_get_pages(mock_sign, mock_jobs, client):
-    mock_jobs.find_one.return_value = {
-        "job_id": "job1",
-        "user_id": "user_id_123",
-        "pages": {"page_1": {"audio_path": "test.mp3", "duration": 10}},
-    }
+    mock_jobs.find_one = AsyncMock(
+        return_value={
+            "job_id": "job1",
+            "user_id": "user_id_123",
+            "pages": {"page_1": {"audio_path": "test.mp3", "duration": 10}},
+        }
+    )
     mock_sign.return_value = "http://signed"
 
-    # mock token manually here by pass directly
-    # In conftest we mocking oauth2_scheme but the get_pages explicitly uses Depends(oauth2_scheme)
     response = client.get(
         "/api/v1/audio/pages/job1", headers={"Authorization": "Bearer testtoken"}
     )
@@ -66,9 +73,14 @@ def test_get_pages(mock_sign, mock_jobs, client):
 @patch("app.api.v1.audio.users_collection")
 @patch("app.api.v1.audio.jobs_collection")
 def test_share_audiobook(mock_jobs, mock_users, client):
-    mock_users.find.return_value = [{"email": "friend@example.com"}]
-    mock_update = mock_jobs.update_one.return_value
-    mock_update.matched_count = 1
+    mock_users.find.return_value = AsyncMock()
+    mock_users.find.return_value.__aiter__.return_value = [
+        {"email": "friend@example.com"}
+    ]
+
+    mock_update = AsyncMock()
+    mock_jobs.update_one = mock_update
+    mock_update.return_value.matched_count = 1
 
     response = client.post(
         "/api/v1/audio/share/job1/emails", json={"emails": ["friend@example.com"]}
@@ -79,8 +91,9 @@ def test_share_audiobook(mock_jobs, mock_users, client):
 
 @patch("app.api.v1.audio.jobs_collection")
 def test_unshare_audiobook(mock_jobs, client):
-    mock_update = mock_jobs.update_one.return_value
-    mock_update.matched_count = 1
+    mock_update = AsyncMock()
+    mock_jobs.update_one = mock_update
+    mock_update.return_value.matched_count = 1
 
     response = client.get("/api/v1/audio/unshare/job1")
     assert response.status_code == 200

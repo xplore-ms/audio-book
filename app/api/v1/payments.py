@@ -1,18 +1,33 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from datetime import datetime, timedelta
 import requests
 from app.db.mongo import users_collection, payments_collection, subscriptions_collection
 from app.core.dependencies import get_current_user
 from pydantic import BaseModel
+from app.utils.geo import get_client_ip, get_country_from_ip
 
 from app.core import config
 
-BASE_PRICE_KOBO = 5000  # ₦50 per credit
+from app.utils.config import get_app_config, get_app_plans
+
+
+def get_base_price_kobo():
+    return get_app_config()["base_price_kobo"]
+
 
 PAYSTACK_SECRET = config.PAYSTACK_SECRET
 PAYSTACK_BASE = config.PAYSTACK_BASE
 
+
 router = APIRouter(prefix="/payments", tags=["Payments"])
+
+
+@router.get("/detect-country")
+async def detect_country(request: Request):
+    ip = get_client_ip(request)
+    country_code = get_country_from_ip(ip)
+    return {"country": country_code, "ip": ip}
+
 
 # ---------------- FX CONFIG ----------------
 FX_API_URL = "https://open.er-api.com/v6/latest/USD"
@@ -22,22 +37,16 @@ _fx_cache = {"rate": None, "expires_at": None}
 # ------------------------------------------
 
 
-PLAN_MAP = {
-    "starter": {"credits": 50, "price_ngn": 1000},
-    "professional": {"credits": 120, "price_ngn": 2000},
-    "mastery": {"credits": 500, "price_ngn": 5000},
-}
-
-
 class InitiatePaymentRequest(BaseModel):
     plan_id: str
     callback_url: str | None = None
 
 
 def get_plan_details(plan_id: str):
-    if plan_id not in PLAN_MAP:
+    plans = get_app_plans()
+    if plan_id not in plans:
         raise HTTPException(400, "Invalid plan ID")
-    return PLAN_MAP[plan_id]
+    return plans[plan_id]
 
 
 def get_usd_to_ngn_rate() -> float:
@@ -83,10 +92,10 @@ def calculate_upgrade_price(user_id, new_plan_id: str) -> float:
 
     current_plan_id = sub["plan_id"]
 
-    if current_plan_id not in PLAN_MAP:
+    if current_plan_id not in get_app_plans():
         return amount_ngn
 
-    current_price = PLAN_MAP[current_plan_id]["price_ngn"]
+    current_price = get_app_plans()[current_plan_id]["price_ngn"]
 
     if amount_ngn <= current_price:
         return amount_ngn

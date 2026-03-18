@@ -1,8 +1,8 @@
-from fastapi import APIRouter, HTTPException, Form, Request
-from fastapi.params import Depends
+from fastapi import APIRouter, HTTPException, Form, Request, Response, Depends
 from app.core.rate_limiter import rate_limit
 from app.core.dependencies import get_current_user
 from app.domain.user import service as user_service
+import os
 import logging
 
 
@@ -58,7 +58,12 @@ async def verify_email_code(email: str = Form(...), code: str = Form(...)):
 
 
 @router.post("/login")
-async def login(request: Request, email: str = Form(...), password: str = Form(...)):
+async def login(
+    request: Request,
+    response: Response,
+    email: str = Form(...),
+    password: str = Form(...),
+):
     ip_address = get_client_ip(request)
     rate_limit(f"login:{email}", limit=5, window_seconds=300)
     if ip_address:
@@ -66,7 +71,30 @@ async def login(request: Request, email: str = Form(...), password: str = Form(.
 
     svc = user_service.UserService.default()
     try:
-        return await svc.login_user(email, password)
+        res = await svc.login_user(email, password)
+
+        is_local = os.getenv("ENVIRONMENT") == "local"
+        cookie_params = {
+            "httponly": True,
+            "secure": not is_local,
+            "samesite": "lax" if is_local else "none",
+            "path": "/",
+        }
+
+        response.set_cookie(
+            key="access_token",
+            value=res["access_token"],
+            max_age=60 * 60 * 24 * 7,  # 7 days
+            **cookie_params,
+        )
+
+        response.set_cookie(
+            key="refresh_token",
+            value=res["refresh_token"],
+            max_age=60 * 60 * 24 * 30,  # 30 days
+            **cookie_params,
+        )
+        return res
     except PermissionError as e:
         raise HTTPException(status_code=401, detail=str(e))
 
@@ -101,9 +129,64 @@ async def get_me(user=Depends(get_current_user)):
 
 
 @router.post("/refresh-token")
-async def refresh_token(refresh_token: str = Form(...)):
+async def refresh_token(request: Request, response: Response):
     svc = user_service.UserService.default()
     try:
-        return await svc.refresh_user_token(refresh_token)
+        token = request.cookies.get("refresh_token")
+        if not token:
+            # Fallback for old clients
+            form = await request.form()
+            token = form.get("refresh_token")
+            if not token:
+                raise ValueError("No refresh token provided")
+
+        res = await svc.refresh_user_token(token)
+
+        is_local = os.getenv("ENVIRONMENT") == "local"
+        cookie_params = {
+            "httponly": True,
+            "secure": not is_local,
+            "samesite": "lax" if is_local else "none",
+            "path": "/",
+        }
+
+        response.set_cookie(
+            key="access_token",
+            value=res["access_token"],
+            max_age=60 * 60 * 24 * 7,
+            **cookie_params,
+        )
+        response.set_cookie(
+            key="refresh_token",
+            value=res["refresh_token"],
+            max_age=60 * 60 * 24 * 30,
+            **cookie_params,
+        )
+        return res
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
+
+
+@router.post("/logout")
+async def logout(response: Response):
+    is_local = os.getenv("ENVIRONMENT") == "local"
+    cookie_params = {
+        "httponly": True,
+        "secure": not is_local,
+        "samesite": "lax" if is_local else "none",
+        "path": "/",
+    }
+    response.delete_cookie(key="access_token", **cookie_params)
+    response.delete_cookie(key="refresh_token", **cookie_params)
+    return {"message": "Successfully logged out"}
+
+
+@router.patch("/me")
+async def update_me(
+    user_update: user_service.UserUpdate, user=Depends(get_current_user)
+):
+    svc = user_service.UserService.default()
+    try:
+        return await svc.update_user(user["_id"], user_update)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

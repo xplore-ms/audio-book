@@ -3,9 +3,16 @@ from fastapi import HTTPException
 from app.db.mongo import users_collection
 
 
-UPLOAD_COST = 10
-DOWNLOAD_COST = 20
-PAGE_COST = 1
+from app.utils.config import get_app_config
+
+
+def get_upload_cost():
+    return get_app_config()["upload_cost"]
+
+
+def get_page_cost():
+    return get_app_config()["page_cost"]
+
 
 DAILY_LOGIN_REWARD = 5
 TWITTER_REWARD = 10
@@ -24,12 +31,15 @@ def require_credits(user, amount: int):
 
 
 def deduct_credits_atomic(user_id, amount):
+    if amount <= 0:
+        return
+
     # 1. Atomic decrement of total credits
     result = users_collection.update_one(
         {"_id": user_id, "credits": {"$gte": amount}}, {"$inc": {"credits": -amount}}
     )
 
-    if result.modified_count == 0:
+    if result.matched_count == 0:
         raise HTTPException(403, "Insufficient credits")
 
     # 2. Update batches (FIFO)

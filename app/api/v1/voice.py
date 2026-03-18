@@ -25,6 +25,7 @@ def list_voices(
                 "language_codes": 1,
                 "ssml_gender": 1,
                 "sample_text": 1,
+                "engine": 1,
             },
         )
     )
@@ -47,6 +48,7 @@ def list_voices(
                 "language_codes": d.get("language_codes"),
                 "ssml_gender": d.get("ssml_gender"),
                 "sample_text": d.get("sample_text"),
+                "engine": d.get("engine", "google"),
                 "supabase_path": path,
                 "url": url,
                 "expires_at": expires_at if url else None,
